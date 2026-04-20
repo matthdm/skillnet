@@ -23,6 +23,7 @@ class JobStatus(str, Enum):
     COMMITTED = "committed"
     FAILED = "failed"
     EXHAUSTED = "exhausted"
+    PAUSED = "paused"
 
 
 class JobState(BaseModel):
@@ -43,5 +44,7 @@ class JobState(BaseModel):
     degraded: bool = False
     degraded_nodes: list[str] = Field(default_factory=list)
     repair_mode: bool = False
+    last_commit_hash: str | None = None
+    paused_at_node: str | None = None
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)

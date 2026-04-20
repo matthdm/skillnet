@@ -1,4 +1,4 @@
 from .job import JobState, JobStatus
-from .skill import Skill, SkillMatch, TestResult
+from .skill import FeatureSpec, Skill, SkillMatch, TestResult
 
-__all__ = ["JobState", "JobStatus", "Skill", "SkillMatch", "TestResult"]
+__all__ = ["FeatureSpec", "JobState", "JobStatus", "Skill", "SkillMatch", "TestResult"]

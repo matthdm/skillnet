@@ -13,11 +13,12 @@ from core.nodes.inject import inject_node
 from core.nodes.interpret import interpret_failure_node
 from core.nodes.retrieve import retrieve_skills_node
 from core.nodes.test_runner import test_node
+from core.repo_manager import RepoManager
 from core.skills import SkillStore
 from models.job import JobState, JobStatus
 
 
-def build_graph(router: LLMRouter, store: SkillStore, checkpointer=None):
+def build_graph(router: LLMRouter, store: SkillStore, repo_manager: RepoManager, checkpointer=None):
     """
     Build and compile the LangGraph pipeline.
     Dependencies (router, store) are bound to nodes at construction time via partial.
@@ -38,7 +39,7 @@ def build_graph(router: LLMRouter, store: SkillStore, checkpointer=None):
     workflow.add_node("test", test_node)
     workflow.add_node("interpret", partial(interpret_failure_node, llm=interpret_llm, provider_label=codegen_label))
     workflow.add_node("exhaust", _exhaust_node)
-    workflow.add_node("commit", commit_node)
+    workflow.add_node("commit", partial(commit_node, repo_manager=repo_manager))
 
     workflow.set_entry_point("inject")
     workflow.add_edge("inject", "analyze")

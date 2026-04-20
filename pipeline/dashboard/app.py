@@ -34,6 +34,7 @@ STATUS_COLORS = {
     "committed": "#198754",
     "failed": "#dc3545",
     "exhausted": "#adb5bd",
+    "paused": "#495057",
 }
 
 
@@ -55,10 +56,44 @@ def render_status_badge(status: str) -> str:
     )
 
 
+def render_retry_badge(iteration_count: int, max_iterations: int) -> str:
+    return (
+        "<span style='background:#ffc107;color:#212529;"
+        "padding:0.25rem 0.5rem;border-radius:0.4rem;font-size:0.8rem;font-weight:600;'>"
+        f"⚠️ Retry in progress (iteration {iteration_count} of {max_iterations})"
+        "</span>"
+    )
+
+
+def render_edge_case_alerts(job: dict[str, Any]) -> None:
+    status = str(job.get("status", "")).lower()
+    iteration_count = int(job.get("iteration_count", 0) or 0)
+    max_iterations = int(job.get("max_iterations", 0) or 0)
+
+    if status == "exhausted":
+        st.warning("🛑 Exhausted — manual review required.")
+
+    if status == "paused":
+        paused_at_node = str(job.get("paused_at_node") or "unknown node")
+        st.warning(f"🕐 Stuck at {paused_at_node} — awaiting intervention.")
+
+    retrying = (
+        status in {"failed", "coding", "testing"}
+        and iteration_count > 0
+        and max_iterations > 0
+        and iteration_count < max_iterations
+    )
+    if retrying:
+        st.markdown(render_retry_badge(iteration_count, max_iterations), unsafe_allow_html=True)
+
+
 st.set_page_config(page_title="Skillnet Pipeline", layout="wide")
 st.title("Skillnet Pipeline")
 
-page = st.sidebar.selectbox("Navigate", ["Jobs Queue", "Job Detail", "Skill Pool", "Degraded Jobs"])
+page = st.sidebar.selectbox(
+    "Navigate",
+    ["Jobs Queue", "Job Detail", "Skill Pool", "Degraded Jobs", "Submit Feature"],
+)
 
 if page == "Jobs Queue":
     st.subheader("Jobs Queue")
@@ -90,6 +125,8 @@ elif page == "Job Detail":
             else:
                 response.raise_for_status()
                 job = response.json()
+
+                render_edge_case_alerts(job)
 
                 if job.get("degraded"):
                     st.warning("This job is marked degraded.")
@@ -140,3 +177,24 @@ elif page == "Degraded Jobs":
             cols[1].markdown(render_status_badge(status), unsafe_allow_html=True)
             if cols[2].button("Queue Repair", key=f"repair-{job_id}"):
                 st.success(f"Repair queued for {job_id} (stub).")
+
+elif page == "Submit Feature":
+    st.subheader("Submit Feature")
+    feature_markdown = st.text_area("Feature Markdown", height=220)
+    if st.button("Submit"):
+        try:
+            response = requests.post(
+                f"{API_URL}/ingest/feature/markdown",
+                data=feature_markdown,
+                headers={"Content-Type": "text/plain"},
+                timeout=10,
+            )
+            if response.status_code in {200, 201, 202}:
+                payload = response.json()
+                st.success(f"Queued as job {payload['job_id']}")
+            elif response.status_code in {208, 409}:
+                st.info("Feature already queued.")
+            else:
+                st.error(f"Failed to queue feature: {response.status_code} {response.text}")
+        except requests.RequestException as exc:
+            st.error(f"Failed to queue feature: {exc}")

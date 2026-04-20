@@ -32,11 +32,10 @@ class TestResult(BaseModel):
     raw_output: str
 
 
-class RallyStory(BaseModel):
-    story_id: str
-    name: str
+class FeatureSpec(BaseModel):
+    feature_id: str
+    title: str
     description: str
     acceptance_criteria: str = ""
     tech_stack_hint: list[str] = Field(default_factory=list)
-    project: str = ""
-    iteration: str = ""
+    source: str = "markdown"             # "markdown" | "rally" | "manual"
