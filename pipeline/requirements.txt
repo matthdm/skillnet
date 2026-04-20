@@ -1,0 +1,30 @@
+# Orchestration
+langgraph>=0.2.0
+langchain>=0.2.0
+langchain-core>=0.2.0
+langchain-anthropic>=0.1.0
+langchain-openai>=0.1.0
+langgraph-checkpoint-redis>=0.1.0
+
+# Vector Store
+chromadb>=0.5.0
+
+# API
+fastapi>=0.111.0
+uvicorn[standard]>=0.30.0
+python-dotenv>=1.0.0
+pyyaml>=6.0.0
+
+# Data
+pydantic>=2.7.0
+redis>=5.0.0
+
+# Dashboard
+streamlit>=1.35.0
+
+# HTTP
+requests>=2.32.0
+
+# Dev
+pytest>=8.0.0
+pytest-asyncio>=0.23.0

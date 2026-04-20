@@ -1,0 +1,42 @@
+providers:
+  anthropic:
+    api_key_env: ANTHROPIC_API_KEY
+    models:
+      high: claude-opus-4-7
+      medium: claude-sonnet-4-6
+
+  openai:
+    api_key_env: OPENAI_API_KEY
+    models:
+      medium: gpt-4o
+      low: gpt-4o-mini
+
+tiers:
+  high:
+    primary: anthropic/high
+    fallbacks:
+      - openai/medium
+  medium:
+    primary: anthropic/medium
+    fallbacks:
+      - openai/medium
+      - openai/low
+  low:
+    primary: openai/low
+    fallbacks: []
+
+embeddings:
+  primary:
+    provider: openai
+    model: text-embedding-3-small
+    dimensions: 1536
+
+# EXPERIMENTAL - degraded mode
+# To enable local fallback, set enabled: true and ensure LM Studio is running
+experimental:
+  local:
+    enabled: false
+    base_url: http://localhost:1234/v1
+    api_key: dummy
+    model: qwen2.5-coder-7b
+    degraded_marker: true

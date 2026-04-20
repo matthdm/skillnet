@@ -1,0 +1,47 @@
+# CODEX TASK C1 — implement this file exactly as specified
+# Field names and types must match DESIGN.md Section 6 exactly. Do not rename or restructure.
+# Imports required: pydantic, datetime, enum
+# Do not add fields not listed here. Do not add validators.
+
+from __future__ import annotations
+
+from datetime import datetime
+from enum import Enum
+
+from pydantic import BaseModel, Field
+
+from .skill import SkillMatch, TestResult
+
+
+class JobStatus(str, Enum):
+    PENDING = "pending"
+    INJECTED = "injected"
+    ANALYZED = "analyzed"
+    SKILLS_RETRIEVED = "skills_retrieved"
+    CODING = "coding"
+    TESTING = "testing"
+    COMMITTED = "committed"
+    FAILED = "failed"
+    EXHAUSTED = "exhausted"
+
+
+class JobState(BaseModel):
+    job_id: str
+    story_id: str
+    story_content: dict
+    tech_stack: list[str] = Field(default_factory=list)
+    skills_pool: list[SkillMatch] = Field(default_factory=list)
+    repo_name: str = ""
+    repo_url: str | None = None
+    generated_files: dict[str, str] = Field(default_factory=dict)
+    test_results: TestResult | None = None
+    iteration_count: int = 0
+    max_iterations: int = 3
+    error_logs: list[str] = Field(default_factory=list)
+    status: JobStatus = JobStatus.PENDING
+    provider_log: list[str] = Field(default_factory=list)
+    degraded: bool = False
+    degraded_nodes: list[str] = Field(default_factory=list)
+    repair_mode: bool = False
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)

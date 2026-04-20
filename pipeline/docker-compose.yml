@@ -1,0 +1,47 @@
+services:
+  redis:
+    image: redis:alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    ports:
+      - "8000:8000"
+    env_file: .env
+    volumes:
+      - ./chroma_data:/app/chroma_data
+      - ../skills:/app/skills:ro
+      - ../skills_catalog.json:/app/skills_catalog.json:ro
+      - ../skills_index.json:/app/skills_index.json:ro
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - CHROMA_DATA_PATH=/app/chroma_data
+
+  dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile.dashboard
+    ports:
+      - "8501:8501"
+    env_file: .env
+    depends_on:
+      - api
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - API_URL=http://api:8000
+
+volumes:
+  redis_data:
