@@ -122,7 +122,7 @@ class SkillStore:
 
         for i in range(0, total_skills, batch_size):
             batch = skill_dicts[i : i + batch_size]
-            texts = [d["description"] + "\n" + d["body"][:500] for d in batch]
+            texts = [d["description"] + "\n" + d["body"][:1200] for d in batch]
             embeddings = self._embeddings.embed_documents(texts)
 
             skills = [

@@ -736,6 +736,8 @@ inject → analyze → [complexity check]
 | Per-file codegen (single-agent) | Run `codegen_node` once per file in `file_plan`. Better quality at cost of N LLM calls. | Partially superseded by multi-agent decomposition |
 | Existing codebase context window | For `change_request` jobs, fetch full file tree + content from GitHub and inject into codegen context. Needs chunking strategy for large repos. | v1.1 task; max 20 files, truncate at 3KB each |
 | Complexity auto-classifier | After `analyze_node`, route simple vs complex to single-agent vs multi-agent path. | Heuristics defined in Section 17; not wired in v1 |
+| HyDE retrieval | Before querying ChromaDB, make a small LLM call to generate a synthetic skill description from the analysis summary. Embed that instead of the raw feature text. Closes the semantic gap between feature-spec language and skill-body language. ~$0.001/job. | Currently: use analyze_node summary directly (good); HyDE would be marginally better at higher precision |
+| Skill catalog expansion | Add common CS pattern skills (concurrency, caching, rate limiting, retry, circuit breaker) to close the gap for non-AI features. Current catalog is heavily AI/LLM-weighted. | Manual curation task; not a code change |
 
 ---
 

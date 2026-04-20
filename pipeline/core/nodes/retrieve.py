@@ -25,20 +25,31 @@ def retrieve_skills_node(state: JobState, store: SkillStore) -> dict:
     }
 
 
+_MAX_QUERY_CHARS = 400
+
+
 def _build_query(state: JobState) -> str:
     """
-    Combine tech stack signal with story description for a richer embedding query.
-    Tech stack terms are prepended so they weight heavily in cosine similarity.
+    Build a retrieval query that aligns with skill-description language.
+
+    Skills are indexed as pattern/how-to text. Raw feature descriptions are
+    requirement language — they don't align semantically. We use analyze_node's
+    summary (LLM-written technical paragraph) + tech stack instead, which is
+    much closer to how skill bodies are written.
+
+    Fallback to raw description if analysis hasn't run yet.
     """
-    parts: list[str] = []
+    analysis = state.story_content.get("analysis", {})
+    summary = analysis.get("summary", "")
+    tech = ", ".join(state.tech_stack) if state.tech_stack else ""
 
-    if state.tech_stack:
-        parts.append(" ".join(state.tech_stack))
+    if summary:
+        query = f"{tech}. {summary}" if tech else summary
+    else:
+        # pre-analysis fallback: use title + short description
+        story = state.story_content
+        title = story.get("title", state.story_id)
+        desc = str(story.get("description", ""))[:200]
+        query = f"{tech}. {title}. {desc}" if tech else f"{title}. {desc}"
 
-    story = state.story_content
-    for field in ("description", "name", "acceptance_criteria"):
-        value = story.get(field, "")
-        if value:
-            parts.append(str(value))
-
-    return " ".join(parts).strip() or state.story_id
+    return query[:_MAX_QUERY_CHARS].strip()
