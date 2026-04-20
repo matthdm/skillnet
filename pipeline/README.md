@@ -141,6 +141,33 @@ python pipeline\scripts\smoke_test.py --base-url http://localhost:8000
 
 ---
 
+## Submission Modes
+
+Three modes are available from the **Submit Feature** page. Set via the **Job Type** selector.
+
+### Feature
+Builds a new isolated utility, library, or module. The pipeline creates a new GitHub repo, generates all files from scratch, and opens a PR. Use this when there is no existing codebase involved.
+
+*Example: FEAT-004 — rate limiter library. Produces `rate_limiter/limiter.py`, `tests/test_limiter.py`, etc. in a new repo.*
+
+### New Service
+Builds a complete, independently deployable service. Same as Feature in that a new repo is created, but the analyze prompt is tuned to always produce a full scaffold: entry point, config module (`BaseSettings`), `Dockerfile`, `requirements.txt`, and `README.md` — even if the core feature logic is simple.
+
+Use this when the output needs to run as a container, not just be imported.
+
+*Example: FEAT-005 — task tracker HTTP API. Produces `main.py`, `config.py`, `Dockerfile`, `README.md`, plus the task routes and tests.*
+
+### Change Request
+Modifies an existing repo. You specify a **Target Repo** (the repo name under your GitHub account). Before codegen runs, the pipeline fetches the existing file tree so the LLM knows what's already there. It adds or modifies files in place and opens a PR against the existing repo — it does not create a new repo.
+
+Use this when you want to extend or fix code that was previously generated (or already exists).
+
+*Example: FEAT-006 — add `stats()` and `reset_all()` to FEAT-004's rate limiter. Target repo: `feat-004`. The pipeline reads the existing `limiter.py` before generating the changes.*
+
+**Key distinction:** Feature and New Service generate from a blank slate. Change Request is context-aware — the LLM sees what already exists and must not duplicate or replace it.
+
+---
+
 ## Test Fixtures
 
 | Fixture | Description | Job Type |
@@ -185,9 +212,10 @@ Full architecture and decision log: [`DESIGN.md`](../DESIGN.md)
 
 | Item | Description |
 |------|-------------|
-| **Project registry** | Group features and jobs under named projects. Track which test cases have run, success rate, and total cost per project. |
+| **Project registry** | Group features and jobs under named projects. Track which test cases have run, success rate, and total cost per project. ✅ Built |
+| **Pre-codegen plan + approval** | Before any code is generated, the pipeline produces a lightweight plan: LLM's understanding of the requirements, intended files, and token/cost estimate. A human approves or rejects before codegen runs. See DESIGN.md Section 24. |
 | **Failure recovery** | Resume PAUSED jobs from LangGraph checkpoint. Retry FAILED/EXHAUSTED jobs seeded with prior generated files and error context. Patch-retry with a manual fix hint. |
-| **Submission modes** | `new_service` mode generates a full service scaffold (entrypoint, config, Dockerfile, README). `change_request` mode targets an existing repo — fetches the file tree and modifies files in place. |
+| **Submission modes** | `new_service` scaffold prompt and `change_request` existing-file-tree context. ✅ UI built; `inject_node` routing in progress. |
 | **Job persistence** | Redis AOF + named Docker volume so job history survives `docker compose down/up`. |
 
 ### v2 (future)

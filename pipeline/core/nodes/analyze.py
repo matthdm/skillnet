@@ -22,7 +22,7 @@ Output ONLY valid JSON. No markdown code blocks, no introductory text, no explan
 Ensure the following keys are present in every response:
 - tech_stack: A list of 3-5 specific technologies inferred from requirements (e.g. "FastAPI", "Redis").
 - success_criteria: Testable assertions derived directly from acceptance criteria.
-- file_plan: File paths relative to the project root that must be created (e.g. "app/main.py").
+- file_plan: File paths relative to the project root that must be created or modified (e.g. "app/main.py").
 - summary: A single paragraph plain-English summary of the core technical implementation strategy."""
 
 _USER_TEMPLATE = """Analyze the following feature specification and generate a technical \
@@ -30,10 +30,11 @@ implementation plan in JSON format.
 
 Feature ID: {feature_id}
 Title: {title}
+Job type: {job_type}
 Description: {description}
 Acceptance Criteria: {acceptance_criteria}
 Tech Stack Hints (optional): {tech_stack_hint}
-
+{scaffold_hint_line}
 Return the JSON object strictly adhering to the output requirements defined in your system instructions."""
 
 
@@ -45,15 +46,24 @@ class AnalysisResult(BaseModel):
 
 
 async def analyze_node(state: JobState, llm: BaseChatModel, provider_label: str) -> dict:
+    # Idempotent: skip if analysis already completed (re-queued after plan approval)
+    if state.story_content.get("analysis"):
+        return {"updated_at": datetime.utcnow()}
+
     story = state.story_content
+    scaffold_hint = story.get("scaffold_hint", "")
+    scaffold_hint_line = f"Note: {scaffold_hint}\n" if scaffold_hint else ""
+
     messages = [
         SystemMessage(content=_SYSTEM),
         HumanMessage(content=_USER_TEMPLATE.format(
             feature_id=story.get("feature_id", state.story_id),
             title=story.get("title", state.story_id),
+            job_type=state.job_type,
             description=story.get("description", ""),
             acceptance_criteria=story.get("acceptance_criteria", ""),
             tech_stack_hint=", ".join(story.get("tech_stack_hint", [])) or "none provided",
+            scaffold_hint_line=scaffold_hint_line,
         )),
     ]
 

@@ -38,4 +38,8 @@ class FeatureSpec(BaseModel):
     description: str
     acceptance_criteria: str = ""
     tech_stack_hint: list[str] = Field(default_factory=list)
+    job_type: str = "feature"
+    project_id: str | None = None
+    target_repo: str | None = None
+    repo_name: str | None = None         # explicit override; parsed from ## Repo Name section
     source: str = "markdown"             # "markdown" | "rally" | "manual"

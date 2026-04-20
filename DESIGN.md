@@ -798,11 +798,15 @@ No automatic TTL on job keys in v1. All jobs kept indefinitely. If the volume gr
 
 Three submission modes are supported. The caller sets `job_type` in `FeatureSpec`. The ingest layer and `inject_node` handle the branching — the LangGraph graph itself is unchanged.
 
-| Mode | When to use | Repo outcome |
-|------|-------------|-------------|
-| `feature` | Isolated utility, library, or module. No strong service identity. | New repo named `skillnet-{feature_id}` |
-| `new_service` | Full runnable service with entry point, config, Dockerfile. | New repo named from title slug |
-| `change_request` | Adding to or modifying an existing codebase. | Existing repo; new branch + PR |
+| Mode | When to use | Repo outcome | Context given to codegen |
+|------|-------------|-------------|--------------------------|
+| `feature` | Isolated utility, library, or module with no prior codebase. | New repo `skillnet-{feature_id}` | Feature spec + retrieved skills |
+| `new_service` | Full runnable service — needs entrypoint, config, Dockerfile, README. | New repo named from title slug | Feature spec + retrieved skills + scaffold prompt |
+| `change_request` | Adding to or modifying files in an existing repo. | Existing repo; new branch + PR | Feature spec + retrieved skills + existing file tree + content of files being modified |
+
+**The key distinction** is what context codegen receives. `feature` and `new_service` generate from a blank slate. `change_request` is aware of what already exists and must not replace or duplicate it.
+
+**`feature` vs `new_service`**: the difference is scope. A `feature` produces the minimal set of files that implement the requirement. A `new_service` is always a complete, independently deployable artifact — even if the core logic is simple, the analyze prompt mandates a Dockerfile, config module, entry point, and README. Use `new_service` when the output needs to run as a container. Use `feature` when you're building a library or utility that another service will import.
 
 ### New Service Mode
 
@@ -1004,6 +1008,143 @@ GET  /jobs/{job_id}/children        → list jobs that were created as retries o
 
 ---
 
+## 24. Pre-Codegen Planning Step (Human-in-the-Loop)
+
+### Requirement
+
+Before any code is generated, the pipeline must produce a **lightweight implementation plan** and pause for human approval. The plan gives the operator a clear view of what the LLM intends to build before compute and token costs are committed to codegen. Approval is a single click; rejection stops the job with optional feedback.
+
+### New Pipeline State
+
+```
+PENDING → INJECTED → ANALYZED → SKILLS_RETRIEVED → PLANNING → [human approves] → CODING → TESTING → COMMITTED
+```
+
+`PLANNING` is a human-gate state, not an error state. The job is healthy — it is waiting for input. Jobs in `PLANNING` are surfaced prominently in the Jobs Queue and Job Detail pages.
+
+### Plan Schema
+
+Designed to be **lightweight** (low token cost to generate), **consistent** across all three job types, and **reusable** (same model for approve/reject flows and retry context).
+
+```python
+class PlanFile(BaseModel):
+    path: str                         # relative file path
+    action: str                       # "create" | "modify" | "delete"
+    description: str                  # ≤ 20 words: what this file does
+
+class ImplementationPlan(BaseModel):
+    requirements_brief: str           # ≤ 100 words: LLM's understanding of what must be built
+    approach: str                     # ≤ 150 words: how it will be built and why
+    files: list[PlanFile]             # every file the LLM intends to touch
+    estimated_input_tokens: int       # tokens the codegen call will consume (input)
+    estimated_output_tokens: int      # tokens the codegen call will produce (output)
+    estimated_cost_usd: float         # derived from tokens × provider pricing
+    status: str = "pending"           # "pending" | "approved" | "rejected"
+    rejection_reason: str | None = None
+```
+
+`ImplementationPlan` is stored in `JobState.implementation_plan`. It is set by `plan_node` and read by the conditional edge that routes to `codegen_node` (approved) or `FAILED` (rejected).
+
+**Why `requirements_brief` matters:** The LLM must demonstrate it understood the requirement before it writes a line of code. A brief that is wrong or incomplete is a signal to reject the plan and refine the spec — catching misunderstanding before it propagates into generated code.
+
+**Why token estimates:** Operators can see before approving whether the job will cost $0.02 or $0.80. For a change request against a large repo, the input token count may be much higher than expected. Surface this before committing.
+
+### `plan_node`
+
+- **LLM tier:** MEDIUM (same as codegen — plan quality matters)
+- **Timeout:** 60 seconds
+- **Input context:** `analyze_node` summary + tech stack + file plan + top-3 skill summaries + (for change_request) existing file list
+- **Output:** `ImplementationPlan` via `with_structured_output`
+- **Returns:** `status=PLANNING`, `implementation_plan=plan`
+
+The plan_node prompt instructs the LLM to:
+1. Restate the requirement in its own words (requirements_brief)
+2. Describe the implementation approach
+3. List every file it will create/modify/delete with a one-line description
+4. Estimate token counts for the codegen call based on file count and complexity
+
+Token estimation guidance given to the LLM:
+- Input: ~500 base + ~200 per file to modify (existing content) + ~100 per retrieved skill
+- Output: ~150 tokens per 10 lines of generated code; estimate lines per file from complexity
+
+### Graph Routing
+
+After `retrieve_skills_node`, a conditional edge checks:
+
+```python
+def route_after_retrieve(state: JobState) -> str:
+    if state.implementation_plan is None:
+        return "plan_node"
+    if state.implementation_plan.status == "approved":
+        return "codegen_node"
+    if state.implementation_plan.status == "rejected":
+        return END  # FAILED state already set
+    return END  # status == "pending" — waiting for human
+```
+
+On approval, `approve_plan` endpoint sets `plan.status = "approved"` and `state.status = SKILLS_RETRIEVED`, then re-queues the job. The LangGraph thread resumes from checkpoint and the conditional edge routes to `codegen_node`.
+
+### Approval API
+
+```
+POST /jobs/{job_id}/approve-plan        → sets plan.status="approved", re-queues job
+POST /jobs/{job_id}/reject-plan         → body: {reason: str}; sets plan.status="rejected", status=FAILED
+```
+
+### Dashboard: Plan Review UI
+
+When a job is in `PLANNING` state, the Job Detail page replaces the execution trace with a **Plan Review card**:
+
+```
+┌─────────────────────────────────────────────────────┐
+│  PLAN REVIEW — awaiting your approval               │
+├─────────────────────────────────────────────────────┤
+│  Requirements understood:                           │
+│  "Build a thread-safe token bucket rate limiter     │
+│   using Python stdlib. Each key gets its own        │
+│   bucket. allow() consumes one token..."            │
+├─────────────────────────────────────────────────────┤
+│  Approach:                                          │
+│  "Implement RateLimiter using a dict of _Bucket     │
+│   dataclasses with per-key threading.Lock. Token    │
+│   refill uses time.monotonic()..."                  │
+├─────────────────────────────────────────────────────┤
+│  Files                                              │
+│  CREATE  rate_limiter/limiter.py  Core class        │
+│  CREATE  rate_limiter/__init__.py  Public exports   │
+│  CREATE  tests/test_limiter.py   Unit tests         │
+├─────────────────────────────────────────────────────┤
+│  Estimates                                          │
+│  Input: ~2,400 tokens   Output: ~1,800 tokens       │
+│  Estimated cost: $0.0032                            │
+├─────────────────────────────────────────────────────┤
+│  [  Approve  ]    [  Reject  ]                      │
+└─────────────────────────────────────────────────────┘
+```
+
+Reject opens a text field for optional feedback, stored in `rejection_reason`.
+
+**Rejection is terminal for that job.** Status goes to `REJECTED` — distinct from `FAILED` (execution failure) and `EXHAUSTED` (iteration limit). A rejected job means the spec needs refinement. The operator corrects the markdown and submits a new job. The rejection reason surfaces in the Jobs Queue as a reminder of why the prior attempt was stopped. This keeps the retry/resume flow exclusively for jobs that were approved and then encountered implementation failures — the two concerns do not mix.
+
+### JobState Changes
+
+```python
+implementation_plan: ImplementationPlan | None = None
+```
+
+### Files Affected
+
+| File | Change |
+|------|--------|
+| `models/job.py` | Add `ImplementationPlan`, `PlanFile` models; add `implementation_plan` to `JobState`; add `PLANNING` to `JobStatus` |
+| `core/nodes/plan.py` | New node — LLM call returning `ImplementationPlan`, sets `status=PLANNING` |
+| `core/graph.py` | Add `plan_node`, update conditional edge after `retrieve_skills_node` |
+| `api/routes/jobs.py` | Add `POST /jobs/{id}/approve-plan` and `POST /jobs/{id}/reject-plan` |
+| `dashboard/pages/2_Job_Detail.py` | Plan Review card when `status=PLANNING` |
+| `dashboard/pages/1_Jobs_Queue.py` | Highlight jobs in PLANNING state |
+
+---
+
 ## 23. Decision Log
 
 All significant decisions are recorded here with rationale. Do not delete entries.
@@ -1034,4 +1175,6 @@ All significant decisions are recorded here with rationale. Do not delete entrie
 | 2026-04-20 | Project registry in Redis, same pattern as job storage | Features need to be grouped for test case tracking and workstream visibility. Redis set `projects:all` + hash `project:{id}` is consistent with existing job storage pattern. No new infrastructure needed. | SQLite project table (adds dependency); in-memory dict (not persistent) |
 | 2026-04-20 | Three-tier failure recovery: resume / retry / patch-retry | PAUSED jobs can resume from LangGraph checkpoint. FAILED/EXHAUSTED jobs need a new job seeded with prior context. User-supplied patch instructions are a third tier that accelerates convergence without a full re-run. All three use `parent_job_id` linkage for traceability. | Single "re-run from scratch" operation only |
 | 2026-04-20 | `pr_url` added to JobState; returned by commit_node | PR URL was logged but not stored. Storing it in state makes it accessible to the dashboard, the Project registry, and future Rally integration without a GitHub API roundtrip. | Fetch PR URL on demand via GitHub API from branch name |
+| 2026-04-20 | Pre-codegen planning step with human approval gate | Before codegen runs, a HIGH tier (Opus) LLM produces a lightweight plan: requirements brief, approach, file list, token/cost estimate. Job pauses in PLANNING state. Human approves (job re-queues to codegen) or rejects (REJECTED terminal state). HIGH tier for plan because correctness of understanding matters more than cost at this stage — plan call is ~1-2K tokens ($0.03 Opus vs $0.005 Sonnet). MEDIUM tier for codegen as before. | MEDIUM for both (cheaper but risks misunderstanding spec at plan time) |
+| 2026-04-20 | REJECTED is a distinct terminal state from FAILED | Rejection means the spec was wrong or misunderstood — operator must refine and resubmit. FAILED means the spec was correct but implementation encountered errors — retry/resume flow applies. Keeping them separate ensures retry logic is never triggered on a deliberately stopped job. | Single FAILED state for both (mixes spec problems with implementation problems) |
 | 2026-04-20 | Token usage and cost tracked per NodeTrace entry | Per-node token counts (via LangChain `TokenUsageHandler` callback) give actionable cost attribution. Summing across the trace gives job-level totals for the dashboard metrics row. Cost estimated from provider label using Anthropic public pricing table. | Job-level totals only (masks which nodes are expensive); no cost tracking (can't optimize spend) |

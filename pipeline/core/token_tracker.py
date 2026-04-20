@@ -19,15 +19,31 @@ class TokenUsageHandler(BaseCallbackHandler):
         self.output_tokens = 0
 
     def on_llm_end(self, response: LLMResult, **kwargs: object) -> None:
-        usage = (response.llm_output or {}).get("usage", {})
-        if not usage:
-            try:
-                gen_info = response.generations[0][0].generation_info or {}
-                usage = gen_info.get("usage", {})
-            except (IndexError, AttributeError):
-                pass
-        self.input_tokens += int(usage.get("input_tokens", 0))
-        self.output_tokens += int(usage.get("output_tokens", 0))
+        usage = self._extract_usage(response)
+        self.input_tokens += int(usage.get("input_tokens", usage.get("prompt_tokens", 0)))
+        self.output_tokens += int(usage.get("output_tokens", usage.get("completion_tokens", 0)))
+
+    # on_chat_model_end fires in newer LangChain versions for ChatModels
+    on_chat_model_end = on_llm_end
+
+    @staticmethod
+    def _extract_usage(response: LLMResult) -> dict:
+        llm_out = response.llm_output or {}
+        # Anthropic standard: llm_output["usage"]
+        if llm_out.get("usage"):
+            return llm_out["usage"]
+        # OpenAI-compat wrapper: llm_output["token_usage"]
+        if llm_out.get("token_usage"):
+            return llm_out["token_usage"]
+        # Newer langchain_anthropic: generation_info["usage_metadata"]
+        try:
+            gen_info = response.generations[0][0].generation_info or {}
+            for key in ("usage_metadata", "usage"):
+                if gen_info.get(key):
+                    return gen_info[key]
+        except (IndexError, AttributeError):
+            pass
+        return {}
 
 
 def estimate_cost(provider_label: str | None, input_tokens: int, output_tokens: int) -> float:

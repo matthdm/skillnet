@@ -8,6 +8,7 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
 
+from core.repo_manager import RepoManager
 from core.token_tracker import TokenUsageHandler
 from models.job import JobState, JobStatus
 
@@ -36,7 +37,7 @@ Files to generate:
 Relevant skill references (max 300 chars each):
 {skill_refs}
 
-{fix_context}Return a raw JSON object: {{ "path/to/file.py": "# complete file content\\n..." }}"""
+{existing_content_section}{fix_context}Return a raw JSON object: {{ "path/to/file.py": "# complete file content\\n..." }}"""
 
 _FIX_TEMPLATE = """Previous attempt failed. Fix the following errors:
 {errors}
@@ -44,8 +45,46 @@ _FIX_TEMPLATE = """Previous attempt failed. Fix the following errors:
 """
 
 
+_MAX_EXISTING_FILE_CHARS = 3000
+
+
 class CodegenResult(BaseModel):
     files: dict[str, str] = Field(default_factory=dict)
+
+
+async def _fetch_modify_content(state: JobState) -> str:
+    """For change_request jobs, fetch existing content of files marked 'modify' in the plan."""
+    if state.job_type != "change_request":
+        return ""
+    plan = state.implementation_plan
+    if not plan:
+        return ""
+    modify_paths = [f.path for f in plan.files if f.action == "modify"]
+    if not modify_paths:
+        return ""
+
+    target_repo = state.story_content.get("target_repo", "")
+    if not target_repo:
+        return ""
+
+    try:
+        repo_manager = RepoManager()
+        lines = ["Existing file content (files you must modify):"]
+        for path in modify_paths[:5]:  # cap at 5 files to stay within token budget
+            try:
+                content = await asyncio.to_thread(
+                    repo_manager.get_file_content, target_repo, path
+                )
+                truncated = content[:_MAX_EXISTING_FILE_CHARS]
+                if len(content) > _MAX_EXISTING_FILE_CHARS:
+                    truncated += "\n... [truncated]"
+                lines.append(f"\n--- {path} ---\n{truncated}")
+            except Exception as exc:
+                logger.warning("codegen_node: could not fetch %s from %s: %s", path, target_repo, exc)
+        return "\n".join(lines) + "\n\n"
+    except Exception as exc:
+        logger.warning("codegen_node: _fetch_modify_content failed: %s", exc)
+        return ""
 
 
 async def codegen_node(state: JobState, llm: BaseChatModel, provider_label: str) -> dict:
@@ -63,12 +102,15 @@ async def codegen_node(state: JobState, llm: BaseChatModel, provider_label: str)
         recent_errors = "\n".join(state.error_logs[-5:])
         fix_context = _FIX_TEMPLATE.format(errors=recent_errors)
 
+    existing_content_section = await _fetch_modify_content(state)
+
     messages = [
         SystemMessage(content=_SYSTEM),
         HumanMessage(content=_USER_TEMPLATE.format(
             summary=summary,
             file_plan="\n".join(f"  - {f}" for f in file_plan),
             skill_refs=skill_refs,
+            existing_content_section=existing_content_section,
             fix_context=fix_context,
         )),
     ]

@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from redis import asyncio as aioredis
 
-from api.routes import admin, ingest, jobs
+from api.routes import admin, ingest, jobs, projects
 from config import load_llm_config
 from core.graph import build_graph
 from core.llm_router import LLMRouter
@@ -166,6 +166,7 @@ app = FastAPI(title="Skillnet Pipeline", version="0.1.0", lifespan=lifespan)
 
 app.include_router(ingest.router, prefix="/ingest", tags=["ingest"])
 app.include_router(jobs.router, prefix="/jobs", tags=["jobs"])
+app.include_router(projects.router, prefix="/projects", tags=["projects"])
 app.include_router(admin.router, prefix="/admin", tags=["admin"])
 
 

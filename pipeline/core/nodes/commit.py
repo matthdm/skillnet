@@ -25,11 +25,16 @@ def commit_node(state: JobState, repo_manager: RepoManager) -> dict:
     commit_msg = f"feat({feature_id}): auto-generated implementation"
 
     try:
-        if not state.repo_url:
+        if state.repo_url:
+            repo_url = state.repo_url
+        elif state.job_type == "change_request":
+            # Target repo already exists — repo_url should have been set by inject_node
+            owner = repo_manager.owner
+            repo_url = f"https://github.com/{owner}/{repo_name}"
+            logger.info("commit_node: using existing repo %s", repo_url)
+        else:
             repo_url = repo_manager.create_repo(repo_name)
             logger.info("commit_node: created repo %s → %s", repo_name, repo_url)
-        else:
-            repo_url = state.repo_url
 
         repo_manager.create_branch(repo_name, branch)
         repo_manager.push_files(repo_name, branch, state.generated_files, commit_msg)

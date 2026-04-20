@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import os
 import re
+from datetime import datetime
 from uuid import uuid4
 
-from fastapi import APIRouter, Body, HTTPException
+from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from redis import asyncio as redis
 
 from models.job import JobState, JobStatus
+from models.project import Project
 from models.skill import FeatureSpec
 
 router = APIRouter()
@@ -21,12 +23,39 @@ async def ingest_feature(spec: FeatureSpec) -> dict:
 
 
 @router.post("/feature/markdown")
-async def ingest_feature_markdown(body: str = Body(..., media_type="text/plain")) -> dict:
+async def ingest_feature_markdown(
+    request: Request,
+    job_type: str = Query(default="feature"),
+    project_id: str | None = Query(default=None),
+    target_repo: str | None = Query(default=None),
+) -> dict:
     """Accept raw markdown, parse into FeatureSpec, and enqueue a pipeline job."""
+    content_type = request.headers.get("content-type", "").lower()
+    if "application/json" in content_type:
+        payload = await request.json()
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=422, detail="JSON body must be an object")
+        body = str(payload.get("markdown", "")).strip()
+        job_type = str(payload.get("job_type", job_type))
+        project_id = payload.get("project_id", project_id)
+        target_repo = payload.get("target_repo", target_repo)
+    else:
+        body = (await request.body()).decode("utf-8").strip()
+
+    if not body:
+        raise HTTPException(status_code=422, detail="Markdown body is empty")
+
     try:
         spec = _parse_markdown(body)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    spec = spec.model_copy(
+        update={
+            "job_type": job_type,
+            "project_id": project_id,
+            "target_repo": target_repo,
+        }
+    )
     return await _enqueue(spec)
 
 
@@ -40,6 +69,8 @@ async def _enqueue(spec: FeatureSpec) -> dict:
         story_id=spec.feature_id,
         story_content=spec.model_dump(),
         status=JobStatus.PENDING,
+        job_type=spec.job_type,
+        project_id=spec.project_id,
     )
 
     try:
@@ -49,6 +80,16 @@ async def _enqueue(spec: FeatureSpec) -> dict:
                 status_code=409,
                 content={"job_id": None, "status": "duplicate detected", "feature_id": spec.feature_id},
             )
+
+        if spec.project_id:
+            project_payload = await redis_client.get(f"project:{spec.project_id}")
+            if project_payload is None:
+                raise HTTPException(status_code=404, detail=f"Project not found: {spec.project_id}")
+            project = Project.model_validate_json(project_payload)
+            if spec.feature_id not in project.feature_ids:
+                project.feature_ids.append(spec.feature_id)
+                project.updated_at = datetime.utcnow()
+                await redis_client.set(f"project:{project.project_id}", project.model_dump_json())
 
         await redis_client.set(f"job:{job_id}", state.model_dump_json())
         await redis_client.sadd("jobs:all", job_id)
@@ -89,6 +130,8 @@ def _parse_markdown(content: str) -> FeatureSpec:
         for line in tech_stack_raw.splitlines()
         if line.strip().lstrip("-•* ")
     ]
+    repo_name_raw = sections.get("repo name", "").strip()
+    repo_name = repo_name_raw or None
 
     if not description:
         raise ValueError("Markdown must contain a ## Description section")
@@ -99,6 +142,7 @@ def _parse_markdown(content: str) -> FeatureSpec:
         description=description,
         acceptance_criteria=acceptance_criteria,
         tech_stack_hint=tech_stack_hint,
+        repo_name=repo_name,
         source="markdown",
     )
 

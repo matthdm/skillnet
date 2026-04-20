@@ -12,9 +12,11 @@ _TOP_K = 10
 def retrieve_skills_node(state: JobState, store: SkillStore) -> dict:
     """
     Semantic search against ChromaDB to populate skills_pool.
-    Query is built from the analyzed tech_stack + story description.
-    No LLM call — pure vector retrieval.
+    Idempotent — skips retrieval if skills_pool is already populated (re-queued after plan approval).
     """
+    if state.skills_pool:
+        return {"updated_at": datetime.utcnow()}
+
     query = _build_query(state)
     matches = store.query(query, n_results=_TOP_K)
 

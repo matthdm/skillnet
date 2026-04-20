@@ -2,16 +2,21 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import dataclass, field
+import os
+from dataclasses import dataclass
 from datetime import datetime
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import JSONResponse
+from redis import asyncio as aioredis
 
 from scripts.ingest_skills import load_all_skills
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+
+def _redis_url() -> str:
+    return os.environ.get("REDIS_URL", "redis://localhost:6379")
 
 
 @dataclass
@@ -82,3 +87,72 @@ async def _run_ingestion(store) -> None:
         _status.error = str(exc)
         _status.completed_at = datetime.utcnow()
         logger.exception("Ingestion failed: %s", exc)
+
+
+# ── Redis management ─────────────────────────────────────────────────────────
+
+@router.get("/redis/stats")
+async def redis_stats() -> dict:
+    """Queue depth, job counts, and dedup set size."""
+    client = aioredis.from_url(_redis_url(), decode_responses=True)
+    try:
+        queue_len = await client.llen("jobs:queue")
+        total_jobs = await client.scard("jobs:all")
+        dedup_count = await client.scard("features:seen")
+        dedup_members = await client.smembers("features:seen")
+        return {
+            "queue_depth": queue_len,
+            "total_jobs": total_jobs,
+            "dedup_count": dedup_count,
+            "seen_feature_ids": sorted(dedup_members),
+        }
+    finally:
+        await client.aclose()
+
+
+@router.delete("/redis/dedup/{feature_id}", status_code=200)
+async def clear_dedup_entry(feature_id: str) -> dict:
+    """Remove a single feature_id from the dedup set so it can be resubmitted."""
+    client = aioredis.from_url(_redis_url(), decode_responses=True)
+    try:
+        removed = await client.srem("features:seen", feature_id)
+        if not removed:
+            raise HTTPException(status_code=404, detail=f"{feature_id} not in dedup set")
+        logger.info("Cleared dedup entry: %s", feature_id)
+        return {"cleared": feature_id}
+    finally:
+        await client.aclose()
+
+
+@router.delete("/redis/dedup", status_code=200)
+async def clear_all_dedup() -> dict:
+    """Clear the entire features:seen dedup set."""
+    client = aioredis.from_url(_redis_url(), decode_responses=True)
+    try:
+        count = await client.scard("features:seen")
+        await client.delete("features:seen")
+        logger.info("Cleared all dedup entries (%d).", count)
+        return {"cleared_count": count}
+    finally:
+        await client.aclose()
+
+
+@router.delete("/redis/jobs", status_code=200)
+async def clear_all_jobs() -> dict:
+    """
+    Remove all job keys, the jobs:all set, and the jobs:queue list.
+    Does NOT touch features:seen — use DELETE /admin/redis/dedup for that.
+    """
+    client = aioredis.from_url(_redis_url(), decode_responses=True)
+    try:
+        job_ids = await client.smembers("jobs:all")
+        pipeline = client.pipeline()
+        for job_id in job_ids:
+            pipeline.delete(f"job:{job_id}")
+        pipeline.delete("jobs:all")
+        pipeline.delete("jobs:queue")
+        await pipeline.execute()
+        logger.info("Cleared all jobs (%d).", len(job_ids))
+        return {"cleared_jobs": len(job_ids)}
+    finally:
+        await client.aclose()

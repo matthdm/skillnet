@@ -96,3 +96,35 @@ class RepoManager:
         response.raise_for_status()
         payload: dict[str, Any] = response.json()
         return str(payload["html_url"])
+
+    def get_file_tree(self, repo: str, branch: str = "main") -> list[str]:
+        """Return all blob file paths in the repo using the Git Trees API."""
+        ref_resp = requests.get(
+            f"{self._base}/repos/{self.owner}/{repo}/git/ref/heads/{branch}",
+            headers=self._headers,
+            timeout=30,
+        )
+        ref_resp.raise_for_status()
+        tree_sha = str(ref_resp.json()["object"]["sha"])
+
+        tree_resp = requests.get(
+            f"{self._base}/repos/{self.owner}/{repo}/git/trees/{tree_sha}",
+            headers=self._headers,
+            params={"recursive": "1"},
+            timeout=30,
+        )
+        tree_resp.raise_for_status()
+        tree_data: dict[str, Any] = tree_resp.json()
+        return [item["path"] for item in tree_data.get("tree", []) if item["type"] == "blob"]
+
+    def get_file_content(self, repo: str, path: str, branch: str = "main") -> str:
+        """Fetch and decode a single file's content from GitHub."""
+        resp = requests.get(
+            f"{self._base}/repos/{self.owner}/{repo}/contents/{path}",
+            headers=self._headers,
+            params={"ref": branch},
+            timeout=30,
+        )
+        resp.raise_for_status()
+        payload: dict[str, Any] = resp.json()
+        return base64.b64decode(payload["content"]).decode("utf-8")

@@ -13,6 +13,23 @@ from pydantic import BaseModel, Field
 from .skill import SkillMatch, TestResult
 
 
+class PlanFile(BaseModel):
+    path: str
+    action: str                        # "create" | "modify" | "delete"
+    description: str                   # ≤ 20 words: what this file does
+
+
+class ImplementationPlan(BaseModel):
+    requirements_brief: str            # ≤ 100 words: LLM's understanding of what must be built
+    approach: str                      # ≤ 150 words: how it will be built
+    files: list[PlanFile]
+    estimated_input_tokens: int
+    estimated_output_tokens: int
+    estimated_cost_usd: float
+    status: str = "pending"            # "pending" | "approved" | "rejected"
+    rejection_reason: str | None = None
+
+
 class NodeTrace(BaseModel):
     node: str
     status_after: str  # JobStatus value — stored as string to avoid forward-ref issues
@@ -37,6 +54,8 @@ class JobStatus(str, Enum):
     FAILED = "failed"
     EXHAUSTED = "exhausted"
     PAUSED = "paused"
+    PLANNING = "planning"
+    REJECTED = "rejected"
 
 
 class JobState(BaseModel):
@@ -61,5 +80,10 @@ class JobState(BaseModel):
     pr_url: str | None = None
     paused_at_node: str | None = None
     execution_trace: list[NodeTrace] = Field(default_factory=list)
+    implementation_plan: ImplementationPlan | None = None
+    # submission context — set at ingest, read-only thereafter
+    job_type: str = "feature"              # "feature" | "new_service" | "change_request"
+    project_id: str | None = None          # links job to a Project
+    parent_job_id: str | None = None       # set when this job is a retry/resume of a prior job
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)

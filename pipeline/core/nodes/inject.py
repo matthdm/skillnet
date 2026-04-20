@@ -1,25 +1,73 @@
 from __future__ import annotations
 
+import asyncio
+import logging
+import os
 import re
 from datetime import datetime
 
+from core.repo_manager import RepoManager
 from models.job import JobState, JobStatus
 
+logger = logging.getLogger(__name__)
 
-def inject_node(state: JobState) -> dict:
+_NEW_SERVICE_SCAFFOLD_HINT = (
+    "This is a new_service job — a complete standalone service. "
+    "The file plan MUST include: a Dockerfile, a config module "
+    "(e.g. app/config.py), an application entrypoint (e.g. app/main.py), "
+    "and a README.md. Do not omit any of these."
+)
+
+
+async def inject_node(state: JobState) -> dict:
     """
-    First node in the pipeline. Validates the job and sets the target repo name.
-    Does not call any LLM or external service.
+    First node in the pipeline. Validates the job, sets repo_name, and injects
+    job-type-specific context into story_content.
+    Idempotent — skips if already past PENDING (e.g. re-queued after plan approval).
     """
+    if state.status != JobStatus.PENDING:
+        return {"updated_at": datetime.utcnow()}
+
     story = state.story_content
-    raw_name = story.get("name") or story.get("story_id") or state.story_id
-    repo_name = _sanitize_repo_name(raw_name)
+    job_type = state.job_type
 
-    return {
+    # Determine repo name
+    if job_type == "change_request" and story.get("target_repo"):
+        repo_name = _sanitize_repo_name(str(story["target_repo"]))
+    else:
+        raw_name = story.get("repo_name") or story.get("title") or state.story_id
+        repo_name = _sanitize_repo_name(raw_name)
+
+    updates: dict = {
         "status": JobStatus.INJECTED,
         "repo_name": repo_name,
         "updated_at": datetime.utcnow(),
     }
+
+    if job_type == "new_service":
+        updates["story_content"] = {**story, "scaffold_hint": _NEW_SERVICE_SCAFFOLD_HINT}
+
+    elif job_type == "change_request" and story.get("target_repo"):
+        target_repo = str(story["target_repo"])
+        owner = os.environ.get("GITHUB_OWNER", "")
+        repo_url = f"https://github.com/{owner}/{target_repo}"
+        updates["repo_url"] = repo_url
+
+        try:
+            repo_manager = RepoManager()
+            existing_files = await asyncio.to_thread(repo_manager.get_file_tree, target_repo)
+            updates["story_content"] = {**story, "existing_files": existing_files}
+            logger.info(
+                "inject_node job %s: fetched %d files from %s",
+                state.job_id, len(existing_files), target_repo,
+            )
+        except Exception as exc:
+            logger.warning(
+                "inject_node job %s: could not fetch file tree for %s: %s",
+                state.job_id, target_repo, exc,
+            )
+
+    return updates
 
 
 def _sanitize_repo_name(raw: str) -> str:

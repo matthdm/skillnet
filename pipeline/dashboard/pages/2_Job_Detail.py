@@ -12,21 +12,23 @@ API_URL = os.environ.get("API_URL", "http://api:8000")
 
 PIPELINE_STAGES = [
     "pending", "injected", "analyzed", "skills_retrieved",
-    "coding", "testing", "committed",
+    "planning", "coding", "testing", "committed",
 ]
-TERMINAL_STAGES = {"committed", "failed", "exhausted", "paused"}
+TERMINAL_STAGES = {"committed", "failed", "exhausted", "paused", "planning", "rejected"}
 
 STATUS_COLORS = {
     "pending":          "#6c757d",
     "injected":         "#0dcaf0",
     "analyzed":         "#0d6efd",
     "skills_retrieved": "#6610f2",
+    "planning":         "#e83e8c",
     "coding":           "#fd7e14",
     "testing":          "#20c997",
     "committed":        "#198754",
     "failed":           "#dc3545",
     "exhausted":        "#adb5bd",
     "paused":           "#495057",
+    "rejected":         "#842029",
 }
 
 
@@ -96,10 +98,65 @@ def render_alerts(job: dict[str, Any]) -> None:
         st.info(f"Retry in progress (iteration {iteration_count} of {max_iterations})")
 
 
+def post_job_action(job_id: str, action: str, payload: dict[str, Any] | None = None) -> None:
+    try:
+        response = requests.post(
+            f"{API_URL}/jobs/{job_id}/{action}",
+            json=payload if payload is not None else {},
+            timeout=10,
+        )
+    except requests.RequestException as exc:
+        st.error(f"Request failed: {exc}")
+        return
+
+    if response.status_code in {200, 201, 202}:
+        content_type = response.headers.get("content-type", "")
+        body = response.json() if content_type.startswith("application/json") else {}
+        new_job_id = body.get("job_id")
+        if action == "retry" and new_job_id:
+            st.success(f"Retry queued as job {new_job_id}.")
+        else:
+            st.success(f"{action.capitalize()} queued.")
+        st.rerun()
+        return
+
+    if response.status_code == 404:
+        st.info(f"{action.capitalize()} endpoint not available yet.")
+        return
+
+    st.error(f"{action.capitalize()} failed ({response.status_code}): {response.text}")
+
+
+def render_recovery_actions(job_id: str, status: str) -> None:
+    if status == "paused":
+        st.divider()
+        if st.button("Resume", type="primary"):
+            post_job_action(job_id, "resume")
+        return
+
+    if status in {"failed", "exhausted"}:
+        st.divider()
+        st.markdown("**Retry Job**")
+        patch_instructions = st.text_area(
+            "Patch instructions (optional)",
+            placeholder="Add any guidance for the retry run.",
+            height=90,
+            key=f"retry_patch_{job_id}",
+        )
+        if st.button("Retry", type="primary"):
+            payload: dict[str, Any] = {}
+            if patch_instructions.strip():
+                payload["patch_instructions"] = patch_instructions.strip()
+            post_job_action(job_id, "retry", payload)
+
+
 # ── Page ─────────────────────────────────────────────────────────────────────
 
 st.title("Job Detail")
-job_id = st.text_input("Job ID")
+
+# Support navigation from Jobs Queue via session state or query params
+_default_id = st.session_state.get("selected_job_id", "") or st.query_params.get("job_id", "")
+job_id = st.text_input("Job ID", value=_default_id)
 
 if not job_id:
     st.stop()
@@ -135,6 +192,7 @@ with header_right:
         st.link_button("Open PR", pr_url)
 
 render_alerts(job)
+render_recovery_actions(job_id, status)
 
 # ── Progress bar ─────────────────────────────────────────────────────────────
 st.divider()
@@ -154,6 +212,86 @@ m2.metric("Output tokens", f"{total_out:,}")
 m3.metric("Est. cost", f"${total_cost:.4f}")
 m4.metric("Node time", f"{total_dur / 1000:.1f}s")
 m5.metric("Elapsed", elapsed(job.get("created_at"), job.get("updated_at")))
+
+# ── Plan Review (PLANNING state) ─────────────────────────────────────────────
+plan = job.get("implementation_plan")
+if plan and status == "planning":
+    st.divider()
+    st.markdown(
+        "<div style='background:#2d2400;border:1px solid #a07800;border-radius:6px;"
+        "padding:1rem 1.2rem;margin-bottom:0.5rem'>"
+        "<b style='font-size:1rem;color:#ffd54f'>⏳ Plan Review — awaiting your approval</b>"
+        "</div>",
+        unsafe_allow_html=True,
+    )
+
+    st.markdown("**Requirements understood**")
+    st.info(plan.get("requirements_brief", ""))
+
+    st.markdown("**Approach**")
+    st.write(plan.get("approach", ""))
+
+    files = plan.get("files", [])
+    if files:
+        st.markdown("**Files**")
+        action_colors = {"create": "#198754", "modify": "#fd7e14", "delete": "#dc3545"}
+        for f in files:
+            action = str(f.get("action", "create")).lower()
+            color = action_colors.get(action, "#6c757d")
+            st.markdown(
+                f"<span style='background:{color};color:white;padding:0.1rem 0.4rem;"
+                f"border-radius:3px;font-size:0.75rem;font-weight:600'>{action.upper()}</span> "
+                f"`{f.get('path', '')}` — {f.get('description', '')}",
+                unsafe_allow_html=True,
+            )
+
+    st.markdown("**Estimates**")
+    ec1, ec2, ec3 = st.columns(3)
+    ec1.metric("Input tokens", f"{plan.get('estimated_input_tokens', 0):,}")
+    ec2.metric("Output tokens", f"{plan.get('estimated_output_tokens', 0):,}")
+    ec3.metric("Est. cost", f"${plan.get('estimated_cost_usd', 0):.4f}")
+
+    st.markdown("")
+    approve_col, reject_col, _ = st.columns([1, 1, 3])
+    with approve_col:
+        if st.button("Approve", type="primary", use_container_width=True):
+            try:
+                r = requests.post(f"{API_URL}/jobs/{job_id}/approve-plan", timeout=10)
+                if r.status_code == 200:
+                    st.success("Approved — job queued for codegen.")
+                    st.rerun()
+                else:
+                    st.error(f"Error: {r.text}")
+            except requests.RequestException as exc:
+                st.error(str(exc))
+    with reject_col:
+        if st.button("Reject", type="secondary", use_container_width=True):
+            st.session_state["show_reject_form"] = True
+
+    if st.session_state.get("show_reject_form"):
+        with st.form("reject_form"):
+            reason = st.text_area("Reason (optional — will be shown on retry)", height=80)
+            submitted = st.form_submit_button("Confirm Rejection")
+            if submitted:
+                try:
+                    r = requests.post(
+                        f"{API_URL}/jobs/{job_id}/reject-plan",
+                        json={"reason": reason},
+                        timeout=10,
+                    )
+                    if r.status_code == 200:
+                        st.warning("Plan rejected. Refine your spec and submit a new job.")
+                        st.session_state["show_reject_form"] = False
+                        st.rerun()
+                    else:
+                        st.error(f"Error: {r.text}")
+                except requests.RequestException as exc:
+                    st.error(str(exc))
+
+elif plan and status == "rejected":
+    st.divider()
+    st.error(f"Plan rejected. Reason: {plan.get('rejection_reason') or 'none provided'}")
+    st.caption("Refine the feature spec and submit a new job.")
 
 # ── Alerts / errors ──────────────────────────────────────────────────────────
 error_logs = job.get("error_logs", [])
@@ -231,3 +369,10 @@ if generated:
 # ── Raw state ────────────────────────────────────────────────────────────────
 with st.expander("Full job state", expanded=False):
     st.json(job)
+
+# ── Live refresh for active jobs ─────────────────────────────────────────────
+if status not in TERMINAL_STAGES:
+    import time
+    st.caption(f"Auto-refreshing every 3s — status: {status}")
+    time.sleep(3)
+    st.rerun()
