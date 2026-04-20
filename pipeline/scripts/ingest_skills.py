@@ -52,9 +52,19 @@ import json
 import sys
 from pathlib import Path
 
-SKILLS_ROOT = Path(__file__).parent.parent.parent / "skills"
-SKILLS_CATALOG = Path(__file__).parent.parent.parent / "skills_catalog.json"
-SKILLS_INDEX = Path(__file__).parent.parent.parent / "skills_index.json"
+def _find(name: str) -> Path:
+    # Local dev: pipeline/scripts/ → up 3 = repo root
+    # Docker:    /app/scripts/     → up 2 = /app (where volumes are mounted)
+    for base in [Path(__file__).parent.parent.parent, Path(__file__).parent.parent]:
+        p = base / name
+        if p.exists():
+            return p
+    return Path(__file__).parent.parent.parent / name  # fallback with useful error path
+
+
+SKILLS_ROOT = _find("skills")
+SKILLS_CATALOG = _find("skills_catalog.json")
+SKILLS_INDEX = _find("skills_index.json")
 
 
 def parse_skill_body(skill_dir: Path) -> str:

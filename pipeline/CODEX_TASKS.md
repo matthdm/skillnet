@@ -206,6 +206,38 @@ Add an execution trace expandable section to the existing Job Detail page.
 - Do not touch `core/`, `DESIGN.md`, or `AGENTS.md`
 - **C12 is a prerequisite for C13 and C15** — complete it first so the other tasks have the model available
 
+---
+
+## C16 — Dashboard: Admin Page
+
+**File:** `pipeline/dashboard/pages/5_Admin.py`
+
+**What to build:**
+An admin page for triggering skill ingestion and watching progress live.
+
+**Spec:**
+```
+API_URL = os.environ.get("API_URL", "http://api:8000")
+```
+
+Layout:
+- `st.title("Admin")`
+- `st.subheader("Skill Ingestion")`
+- On page load: GET `{API_URL}/admin/ingest-skills/status` and display current state
+  - Show `st.info("Status: idle")`, `st.success("Status: complete — N skills indexed")`, `st.error(...)` for failed, or a progress bar if running
+- A **"Run Ingestion"** button:
+  - If state is `"running"`: disable the button and show `st.warning("Ingestion already running.")`
+  - Otherwise: POST `{API_URL}/admin/ingest-skills`, show `st.info("Ingestion started...")`
+- **Live progress while running**: use `st.empty()` + a `while True` polling loop with `time.sleep(2)` that GETs status and updates a `st.progress(skills_processed / skills_total)` bar and a `st.text(f"{skills_processed} / {skills_total} skills embedded")` label until state is no longer `"running"`, then show final result
+- Show `started_at` and `completed_at` timestamps if present
+
+**Do not:**
+- Add authentication
+- Modify any other dashboard files
+- Call ChromaDB or Redis directly — go through the API only
+
+---
+
 ### What Claude owns next session (do not implement)
 - Wiring `NodeTrace` population into `_job_worker` in `api/main.py`
 - Calling `setup_logging()` from `api/main.py` on startup

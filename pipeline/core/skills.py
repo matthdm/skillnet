@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from typing import Callable
 
 import chromadb
 from langchain_core.embeddings import Embeddings
@@ -104,20 +105,24 @@ class SkillStore:
     def count(self) -> int:
         return self._collection.count()
 
-    def embed_and_upsert(self, skill_dicts: list[dict]) -> int:
+    def embed_and_upsert(
+        self,
+        skill_dicts: list[dict],
+        on_batch: Callable[[int, int], None] | None = None,
+    ) -> int:
         """
         Embed a list of raw skill dicts (from ingest_skills.load_all_skills)
         and upsert into the collection. Returns count of skills ingested.
         Processes in batches of 100 to avoid OOM on embedding calls.
+        on_batch(processed, total) is called after each batch if provided.
         """
         batch_size = 100
-        total = 0
+        total_skills = len(skill_dicts)
+        processed = 0
 
-        for i in range(0, len(skill_dicts), batch_size):
+        for i in range(0, total_skills, batch_size):
             batch = skill_dicts[i : i + batch_size]
-            texts = [
-                d["description"] + "\n" + d["body"][:500] for d in batch
-            ]
+            texts = [d["description"] + "\n" + d["body"][:500] for d in batch]
             embeddings = self._embeddings.embed_documents(texts)
 
             skills = [
@@ -136,6 +141,8 @@ class SkillStore:
                 for d, emb in zip(batch, embeddings)
             ]
             self.upsert_batch(skills)
-            total += len(skills)
+            processed += len(skills)
+            if on_batch:
+                on_batch(processed, total_skills)
 
-        return total
+        return processed

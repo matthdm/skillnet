@@ -63,6 +63,7 @@ def commit_node(state: JobState, repo_manager: RepoManager) -> dict:
 
     return {
         "repo_url": repo_url,
+        "pr_url": pr_url,
         "last_commit_hash": last_commit_hash,
         "status": JobStatus.COMMITTED,
         "updated_at": datetime.utcnow(),

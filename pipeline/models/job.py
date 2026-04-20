@@ -13,6 +13,19 @@ from pydantic import BaseModel, Field
 from .skill import SkillMatch, TestResult
 
 
+class NodeTrace(BaseModel):
+    node: str
+    status_after: str  # JobStatus value — stored as string to avoid forward-ref issues
+    provider: str | None = None
+    duration_ms: int
+    iteration: int
+    error: str | None = None
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cost_usd: float = 0.0
+    timestamp: datetime = Field(default_factory=datetime.utcnow)
+
+
 class JobStatus(str, Enum):
     PENDING = "pending"
     INJECTED = "injected"
@@ -45,6 +58,8 @@ class JobState(BaseModel):
     degraded_nodes: list[str] = Field(default_factory=list)
     repair_mode: bool = False
     last_commit_hash: str | None = None
+    pr_url: str | None = None
     paused_at_node: str | None = None
+    execution_trace: list[NodeTrace] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)

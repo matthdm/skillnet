@@ -1,22 +1,25 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import os
+import time
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from redis import asyncio as aioredis
 
-from api.routes import ingest, jobs
+from api.routes import admin, ingest, jobs
 from config import load_llm_config
 from core.graph import build_graph
 from core.llm_router import LLMRouter
 from core.repo_manager import RepoManager
 from core.skills import SkillStore
-from models.job import JobState, JobStatus
+from core.token_tracker import estimate_cost
+from logging_config import setup_logging
+from models.job import JobState, JobStatus, NodeTrace
 
+setup_logging(os.environ.get("LOG_LEVEL", "INFO"))
 logger = logging.getLogger(__name__)
 
 _CONFIG_PATH = None  # uses default config/llm.yaml relative to package
@@ -46,12 +49,17 @@ async def lifespan(app: FastAPI):
     repo_manager = RepoManager()
 
     # ── LangGraph with Redis checkpointer ────────────────────────────────
+    checkpointer_cm = None
     try:
         from langgraph.checkpoint.redis import AsyncRedisSaver
-        checkpointer = AsyncRedisSaver.from_conn_string(redis_url)
-    except (ImportError, Exception):
-        logger.warning("AsyncRedisSaver unavailable — running without checkpointing.")
-        checkpointer = None
+        checkpointer_cm = AsyncRedisSaver.from_conn_string(redis_url)
+        checkpointer = await checkpointer_cm.__aenter__()
+        logger.info("Redis checkpointer ready.")
+    except (ImportError, Exception) as exc:
+        logger.warning("AsyncRedisSaver unavailable (%s) — using InMemorySaver.", exc)
+        from langgraph.checkpoint.memory import InMemorySaver
+        checkpointer = InMemorySaver()
+        checkpointer_cm = None
 
     graph = build_graph(router=router, store=store, repo_manager=repo_manager, checkpointer=checkpointer)
 
@@ -72,6 +80,9 @@ async def lifespan(app: FastAPI):
         await worker_task
     except asyncio.CancelledError:
         pass
+
+    if checkpointer_cm is not None:
+        await checkpointer_cm.__aexit__(None, None, None)
 
 
 async def _job_worker(app: FastAPI) -> None:
@@ -101,13 +112,44 @@ async def _job_worker(app: FastAPI) -> None:
 
             try:
                 config = {"configurable": {"thread_id": job_id}}
+                t_node_start = time.monotonic()
                 async for chunk in graph.astream(state, config=config):
+                    t_node_end = time.monotonic()
                     node_name = next(iter(chunk))
-                    node_output = chunk[node_name]
-                    updated = state.model_copy(update=node_output)
+                    raw_output = dict(chunk[node_name])
+                    input_tokens = int(raw_output.pop("_input_tokens", 0))
+                    output_tokens = int(raw_output.pop("_output_tokens", 0))
+                    updated = state.model_copy(update=raw_output)
+                    duration_ms = int((t_node_end - t_node_start) * 1000)
+                    t_node_start = t_node_end
+
+                    new_error = next(
+                        (e for e in updated.error_logs if e not in state.error_logs), None
+                    )
+                    provider = next(
+                        (p for p in updated.provider_log if p not in state.provider_log), None
+                    )
+                    trace_entry = NodeTrace(
+                        node=node_name,
+                        status_after=updated.status.value,
+                        provider=provider,
+                        duration_ms=duration_ms,
+                        iteration=updated.iteration_count,
+                        error=new_error,
+                        input_tokens=input_tokens,
+                        output_tokens=output_tokens,
+                        cost_usd=estimate_cost(provider, input_tokens, output_tokens),
+                    )
+                    updated = updated.model_copy(
+                        update={"execution_trace": updated.execution_trace + [trace_entry]}
+                    )
                     await redis_client.set(f"job:{job_id}", updated.model_dump_json())
                     state = updated
-                    logger.debug("Job %s — node '%s' → status=%s", job_id, node_name, state.status)
+                    logger.info(
+                        "Job %s — node '%s' → %s (%dms)",
+                        job_id, node_name, state.status.value, duration_ms,
+                        extra={"job_id": job_id, "node": node_name},
+                    )
 
             except Exception as exc:
                 logger.exception("Job %s failed with unhandled exception: %s", job_id, exc)
@@ -124,6 +166,7 @@ app = FastAPI(title="Skillnet Pipeline", version="0.1.0", lifespan=lifespan)
 
 app.include_router(ingest.router, prefix="/ingest", tags=["ingest"])
 app.include_router(jobs.router, prefix="/jobs", tags=["jobs"])
+app.include_router(admin.router, prefix="/admin", tags=["admin"])
 
 
 @app.get("/health")

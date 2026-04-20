@@ -8,6 +8,7 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
 
+from core.token_tracker import TokenUsageHandler
 from models.job import JobState, JobStatus
 
 logger = logging.getLogger(__name__)
@@ -73,9 +74,10 @@ async def codegen_node(state: JobState, llm: BaseChatModel, provider_label: str)
     ]
 
     try:
+        handler = TokenUsageHandler()
         structured_llm = llm.with_structured_output(CodegenResult)
         result: CodegenResult = await asyncio.wait_for(
-            structured_llm.ainvoke(messages),
+            structured_llm.ainvoke(messages, config={"callbacks": [handler]}),
             timeout=_TIMEOUT,
         )
     except asyncio.TimeoutError:
@@ -100,4 +102,6 @@ async def codegen_node(state: JobState, llm: BaseChatModel, provider_label: str)
         "iteration_count": state.iteration_count + 1,
         "provider_log": state.provider_log + [f"codegen:{provider_label}"],
         "updated_at": datetime.utcnow(),
+        "_input_tokens": handler.input_tokens,
+        "_output_tokens": handler.output_tokens,
     }

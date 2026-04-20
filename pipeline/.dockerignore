@@ -1,0 +1,28 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Temp / build artifacts
+.tmp/
+*.tmp
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+
+# Data (mounted as volumes at runtime)
+chroma_data/
+
+# Dev / local
+.env
+.env.*
+!.env.example
+*.log
+
+# IDE
+.vscode/
+.idea/

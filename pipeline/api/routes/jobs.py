@@ -10,7 +10,7 @@ import os
 from fastapi import APIRouter, HTTPException
 from redis import asyncio as redis
 
-from models.job import JobState
+from models.job import JobState, NodeTrace
 
 router = APIRouter()
 
@@ -28,6 +28,22 @@ async def get_job(job_id: str) -> JobState:
         raise HTTPException(status_code=404, detail=f"Job not found: {job_id}")
 
     return JobState.model_validate_json(payload)
+
+
+@router.get("/{job_id}/trace", response_model=list[NodeTrace])
+async def get_job_trace(job_id: str) -> list[NodeTrace]:
+    redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379")
+    redis_client = redis.from_url(redis_url, decode_responses=True)
+    try:
+        payload = await redis_client.get(f"job:{job_id}")
+    finally:
+        await redis_client.aclose()
+
+    if payload is None:
+        raise HTTPException(status_code=404, detail=f"Job not found: {job_id}")
+
+    state = JobState.model_validate_json(payload)
+    return state.execution_trace
 
 
 @router.get("/")

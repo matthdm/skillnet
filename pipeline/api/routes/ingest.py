@@ -5,6 +5,7 @@ import re
 from uuid import uuid4
 
 from fastapi import APIRouter, Body, HTTPException
+from fastapi.responses import JSONResponse
 from redis import asyncio as redis
 
 from models.job import JobState, JobStatus
@@ -44,12 +45,15 @@ async def _enqueue(spec: FeatureSpec) -> dict:
     try:
         already_seen = await redis_client.sismember("features:seen", spec.feature_id)
         if already_seen:
-            return {"job_id": None, "status": "duplicate", "feature_id": spec.feature_id}
+            return JSONResponse(
+                status_code=409,
+                content={"job_id": None, "status": "duplicate detected", "feature_id": spec.feature_id},
+            )
 
-        await redis_client.rpush("jobs:queue", job_id)
         await redis_client.set(f"job:{job_id}", state.model_dump_json())
         await redis_client.sadd("jobs:all", job_id)
         await redis_client.sadd("features:seen", spec.feature_id)
+        await redis_client.rpush("jobs:queue", job_id)  # enqueue last — state must exist first
     finally:
         await redis_client.aclose()
 

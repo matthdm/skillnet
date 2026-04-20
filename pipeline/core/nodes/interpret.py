@@ -8,6 +8,7 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
 
+from core.token_tracker import TokenUsageHandler
 from models.job import JobState, JobStatus
 
 logger = logging.getLogger(__name__)
@@ -80,9 +81,10 @@ async def interpret_failure_node(state: JobState, llm: BaseChatModel, provider_l
     ]
 
     try:
+        handler = TokenUsageHandler()
         structured_llm = llm.with_structured_output(InterpretResult)
         result: InterpretResult = await asyncio.wait_for(
-            structured_llm.ainvoke(messages),
+            structured_llm.ainvoke(messages, config={"callbacks": [handler]}),
             timeout=_TIMEOUT,
         )
     except asyncio.TimeoutError:
@@ -113,4 +115,6 @@ async def interpret_failure_node(state: JobState, llm: BaseChatModel, provider_l
         ],
         "provider_log": state.provider_log + [f"interpret:{provider_label}"],
         "updated_at": datetime.utcnow(),
+        "_input_tokens": handler.input_tokens,
+        "_output_tokens": handler.output_tokens,
     }
