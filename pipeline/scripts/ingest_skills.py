@@ -29,7 +29,7 @@
 #          category    = entry.get("category", "")
 #          tags        = tags
 #          body        = body
-#          source_path = str(SKILLS_ROOT / entry["id"] / "SKILL.md")
+#          source_path = entry["path"] from catalog (repo-relative, e.g. "skills/angular/SKILL.md")
 #          supports_codex  = targets.get("codex") == "supported"
 #          supports_claude = targets.get("claude") == "supported"
 #   4. Collect results into a list. Count: total_in_catalog, with_body (body != ""), missing_body.
