@@ -7,7 +7,7 @@ from datetime import datetime
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from core.token_tracker import TokenUsageHandler, estimate_cost
+from core.token_tracker import estimate_cost, extract_usage
 from models.job import ImplementationPlan, JobState, JobStatus, PlanFile
 
 logger = logging.getLogger(__name__)
@@ -105,16 +105,13 @@ async def plan_node(state: JobState, llm: BaseChatModel, provider_label: str) ->
     ]
 
     try:
-        handler = TokenUsageHandler()
-
-        class _PlanResult(ImplementationPlan):
-            pass
-
-        structured_llm = llm.with_structured_output(_PlanResult)
-        result: ImplementationPlan = await asyncio.wait_for(
-            structured_llm.ainvoke(messages, config={"callbacks": [handler]}),
+        structured_llm = llm.with_structured_output(ImplementationPlan, include_raw=True)
+        raw = await asyncio.wait_for(
+            structured_llm.ainvoke(messages),
             timeout=_TIMEOUT,
         )
+        result: ImplementationPlan = raw["parsed"]
+        input_tokens, output_tokens = extract_usage(raw.get("raw"))
     except asyncio.TimeoutError:
         logger.warning("plan_node timed out after %ds for job %s", _TIMEOUT, state.job_id)
         return {
@@ -151,6 +148,6 @@ async def plan_node(state: JobState, llm: BaseChatModel, provider_label: str) ->
         "status": JobStatus.PLANNING,
         "provider_log": state.provider_log + [f"plan:{provider_label}"],
         "updated_at": datetime.utcnow(),
-        "_input_tokens": handler.input_tokens,
-        "_output_tokens": handler.output_tokens,
+        "_input_tokens": input_tokens,
+        "_output_tokens": output_tokens,
     }

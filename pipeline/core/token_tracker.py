@@ -1,8 +1,5 @@
 from __future__ import annotations
 
-from langchain_core.callbacks import BaseCallbackHandler
-from langchain_core.outputs import LLMResult
-
 # (input_$/M, output_$/M) — Anthropic public pricing
 _COST_TABLE: dict[str, tuple[float, float]] = {
     "opus":   (15.0, 75.0),
@@ -11,39 +8,25 @@ _COST_TABLE: dict[str, tuple[float, float]] = {
 }
 
 
-class TokenUsageHandler(BaseCallbackHandler):
-    """Accumulates token usage from on_llm_end for a single LLM invocation."""
-
-    def __init__(self) -> None:
-        self.input_tokens = 0
-        self.output_tokens = 0
-
-    def on_llm_end(self, response: LLMResult, **kwargs: object) -> None:
-        usage = self._extract_usage(response)
-        self.input_tokens += int(usage.get("input_tokens", usage.get("prompt_tokens", 0)))
-        self.output_tokens += int(usage.get("output_tokens", usage.get("completion_tokens", 0)))
-
-    # on_chat_model_end fires in newer LangChain versions for ChatModels
-    on_chat_model_end = on_llm_end
-
-    @staticmethod
-    def _extract_usage(response: LLMResult) -> dict:
-        llm_out = response.llm_output or {}
-        # Anthropic standard: llm_output["usage"]
-        if llm_out.get("usage"):
-            return llm_out["usage"]
-        # OpenAI-compat wrapper: llm_output["token_usage"]
-        if llm_out.get("token_usage"):
-            return llm_out["token_usage"]
-        # Newer langchain_anthropic: generation_info["usage_metadata"]
-        try:
-            gen_info = response.generations[0][0].generation_info or {}
-            for key in ("usage_metadata", "usage"):
-                if gen_info.get(key):
-                    return gen_info[key]
-        except (IndexError, AttributeError):
-            pass
-        return {}
+def extract_usage(raw_message: object) -> tuple[int, int]:
+    """
+    Extract (input_tokens, output_tokens) from a LangChain AIMessage.
+    Tries usage_metadata (standardized in LC 0.2+) then response_metadata["usage"].
+    """
+    if raw_message is None:
+        return 0, 0
+    # AIMessage.usage_metadata — standardized field (dict or UsageMetadata)
+    um = getattr(raw_message, "usage_metadata", None) or {}
+    inp = int(um.get("input_tokens", 0))
+    out = int(um.get("output_tokens", 0))
+    if inp or out:
+        return inp, out
+    # response_metadata["usage"] — Anthropic native via langchain_anthropic
+    rm = getattr(raw_message, "response_metadata", {}) or {}
+    usage = rm.get("usage", {})
+    inp = int(usage.get("input_tokens", usage.get("prompt_tokens", 0)))
+    out = int(usage.get("output_tokens", usage.get("completion_tokens", 0)))
+    return inp, out
 
 
 def estimate_cost(provider_label: str | None, input_tokens: int, output_tokens: int) -> float:

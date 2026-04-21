@@ -12,9 +12,10 @@ API_URL = os.environ.get("API_URL", "http://api:8000")
 
 PIPELINE_STAGES = [
     "pending", "injected", "analyzed", "skills_retrieved",
-    "planning", "coding", "testing", "committed",
+    "coding", "testing", "committed",
 ]
-TERMINAL_STAGES = {"committed", "failed", "exhausted", "paused", "planning", "rejected"}
+TERMINAL_STAGES = {"committed", "failed", "exhausted", "paused", "rejected"}
+# PLANNING is intentionally excluded from TERMINAL_STAGES so auto-refresh continues after approval
 
 STATUS_COLORS = {
     "pending":          "#6c757d",
@@ -42,8 +43,10 @@ def badge(status: str) -> str:
 
 
 def pipeline_progress(status: str) -> None:
+    # planning/rejected: show progress at skills_retrieved position
+    display_status = "skills_retrieved" if status in {"planning", "rejected"} else status
     try:
-        step = PIPELINE_STAGES.index(status)
+        step = PIPELINE_STAGES.index(display_status)
     except ValueError:
         step = 0
     total = len(PIPELINE_STAGES) - 1  # committed = 100%
@@ -192,6 +195,12 @@ with header_right:
         st.link_button("Open PR", pr_url)
 
 render_alerts(job)
+
+# Post-approval indicator: plan approved but codegen hasn't started yet
+plan_data = job.get("implementation_plan")
+if plan_data and plan_data.get("status") == "approved" and status == "skills_retrieved":
+    st.info("Plan approved — queued for codegen.", icon="⏳")
+
 render_recovery_actions(job_id, status)
 
 # ── Progress bar ─────────────────────────────────────────────────────────────

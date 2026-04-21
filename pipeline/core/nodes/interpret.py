@@ -8,7 +8,7 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
 
-from core.token_tracker import TokenUsageHandler
+from core.token_tracker import extract_usage
 from models.job import JobState, JobStatus
 
 logger = logging.getLogger(__name__)
@@ -81,12 +81,13 @@ async def interpret_failure_node(state: JobState, llm: BaseChatModel, provider_l
     ]
 
     try:
-        handler = TokenUsageHandler()
-        structured_llm = llm.with_structured_output(InterpretResult)
-        result: InterpretResult = await asyncio.wait_for(
-            structured_llm.ainvoke(messages, config={"callbacks": [handler]}),
+        structured_llm = llm.with_structured_output(InterpretResult, include_raw=True)
+        raw = await asyncio.wait_for(
+            structured_llm.ainvoke(messages),
             timeout=_TIMEOUT,
         )
+        result: InterpretResult = raw["parsed"]
+        input_tokens, output_tokens = extract_usage(raw.get("raw"))
     except asyncio.TimeoutError:
         logger.warning("interpret_node timed out after %ds for job %s", _TIMEOUT, state.job_id)
         return {
@@ -115,6 +116,6 @@ async def interpret_failure_node(state: JobState, llm: BaseChatModel, provider_l
         ],
         "provider_log": state.provider_log + [f"interpret:{provider_label}"],
         "updated_at": datetime.utcnow(),
-        "_input_tokens": handler.input_tokens,
-        "_output_tokens": handler.output_tokens,
+        "_input_tokens": input_tokens,
+        "_output_tokens": output_tokens,
     }

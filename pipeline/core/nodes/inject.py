@@ -33,7 +33,9 @@ async def inject_node(state: JobState) -> dict:
 
     # Determine repo name
     if job_type == "change_request" and story.get("target_repo"):
-        repo_name = _sanitize_repo_name(str(story["target_repo"]))
+        # Strip "owner/" prefix if user entered "owner/repo" format
+        raw_target = str(story["target_repo"])
+        repo_name = _sanitize_repo_name(raw_target.split("/")[-1])
     else:
         raw_name = story.get("repo_name") or story.get("title") or state.story_id
         repo_name = _sanitize_repo_name(raw_name)
@@ -48,7 +50,8 @@ async def inject_node(state: JobState) -> dict:
         updates["story_content"] = {**story, "scaffold_hint": _NEW_SERVICE_SCAFFOLD_HINT}
 
     elif job_type == "change_request" and story.get("target_repo"):
-        target_repo = str(story["target_repo"])
+        # Use the sanitized repo_name (already stripped of owner prefix above)
+        target_repo = repo_name
         owner = os.environ.get("GITHUB_OWNER", "")
         repo_url = f"https://github.com/{owner}/{target_repo}"
         updates["repo_url"] = repo_url
