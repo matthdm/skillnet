@@ -107,7 +107,11 @@ async def _job_worker(app: FastAPI) -> None:
                 logger.warning("Job %s not found in Redis — skipping.", job_id)
                 continue
 
-            state = JobState.model_validate_json(raw)
+            try:
+                state = JobState.model_validate_json(raw)
+            except Exception as exc:
+                logger.error("Job %s has corrupt state, skipping: %s", job_id, exc)
+                continue
             logger.info("Processing job %s (feature %s)", job_id, state.story_id)
 
             try:
@@ -117,8 +121,8 @@ async def _job_worker(app: FastAPI) -> None:
                     t_node_end = time.monotonic()
                     node_name = next(iter(chunk))
                     raw_output = dict(chunk[node_name])
-                    input_tokens = int(raw_output.pop("_input_tokens", 0))
-                    output_tokens = int(raw_output.pop("_output_tokens", 0))
+                    input_tokens = int(raw_output.pop("last_node_input_tokens", 0))
+                    output_tokens = int(raw_output.pop("last_node_output_tokens", 0))
                     updated = state.model_copy(update=raw_output)
                     duration_ms = int((t_node_end - t_node_start) * 1000)
                     t_node_start = t_node_end

@@ -1,10 +1,14 @@
 from __future__ import annotations
 
-# (input_$/M, output_$/M) — Anthropic public pricing
+# (input_$/M, output_$/M) — matched against 'provider/model-name' label substring
 _COST_TABLE: dict[str, tuple[float, float]] = {
-    "opus":   (15.0, 75.0),
-    "sonnet": (3.0,  15.0),
-    "haiku":  (0.25, 1.25),
+    # Anthropic Claude 4.x
+    "opus-4":    (15.0,  75.0),
+    "sonnet-4":  (3.0,   15.0),
+    "haiku-4":   (0.80,  4.0),
+    # OpenAI
+    "gpt-4o-mini": (0.15, 0.60),
+    "gpt-4o":      (2.50, 10.0),
 }
 
 

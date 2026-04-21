@@ -14,7 +14,8 @@ from models.skill import TestResult
 
 logger = logging.getLogger(__name__)
 
-_TIMEOUT = 30  # seconds
+_TIMEOUT_INSTALL = 120  # seconds — pip install for generated requirements
+_TIMEOUT_TEST = 60      # seconds — pytest run
 
 _PASS_RE = re.compile(r"(\d+) passed")
 _FAIL_RE = re.compile(r"(\d+) failed")
@@ -38,6 +39,26 @@ def _parse_output(output: str) -> TestResult:
     )
 
 
+async def _install_requirements(tmpdir: str, req_path: Path) -> tuple[bool, str]:
+    """Run pip install for the generated requirements.txt. Returns (success, output)."""
+    try:
+        proc = await asyncio.wait_for(
+            asyncio.create_subprocess_exec(
+                "pip", "install", "-r", str(req_path), "-q",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            ),
+            timeout=_TIMEOUT_INSTALL,
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=_TIMEOUT_INSTALL)
+        out = stdout.decode("utf-8", errors="replace")
+        return proc.returncode == 0, out
+    except asyncio.TimeoutError:
+        return False, f"pip install timed out after {_TIMEOUT_INSTALL}s"
+    except Exception as exc:
+        return False, f"pip install error: {exc}"
+
+
 async def test_node(state: JobState) -> dict:
     if not state.generated_files:
         return {
@@ -54,6 +75,13 @@ async def test_node(state: JobState) -> dict:
                 full_path.parent.mkdir(parents=True, exist_ok=True)
                 full_path.write_text(content, encoding="utf-8")
 
+            # Install generated requirements before running tests
+            req_path = Path(tmpdir) / "requirements.txt"
+            if req_path.exists():
+                ok, install_out = await _install_requirements(tmpdir, req_path)
+                if not ok:
+                    logger.warning("test_node: pip install failed for job %s: %s", state.job_id, install_out[-500:])
+
             proc = await asyncio.wait_for(
                 asyncio.create_subprocess_exec(
                     "pytest", "-v", "--tb=short", tmpdir,
@@ -61,17 +89,17 @@ async def test_node(state: JobState) -> dict:
                     stderr=asyncio.subprocess.STDOUT,
                     env={**os.environ, "PYTHONPATH": tmpdir},
                 ),
-                timeout=_TIMEOUT,
+                timeout=_TIMEOUT_TEST,
             )
-            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=_TIMEOUT)
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=_TIMEOUT_TEST)
             output = stdout.decode("utf-8", errors="replace")
     except asyncio.TimeoutError:
-        logger.warning("test_node timed out after %ds for job %s", _TIMEOUT, state.job_id)
+        logger.warning("test_node timed out after %ds for job %s", _TIMEOUT_TEST, state.job_id)
         return {
             "status": JobStatus.PAUSED,
             "paused_at_node": "test",
             "updated_at": datetime.utcnow(),
-            "error_logs": state.error_logs + [f"test_node timed out after {_TIMEOUT}s"],
+            "error_logs": state.error_logs + [f"test_node timed out after {_TIMEOUT_TEST}s"],
         }
     except FileNotFoundError:
         logger.error("pytest not found in PATH for job %s", state.job_id)

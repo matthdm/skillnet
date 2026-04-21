@@ -63,8 +63,12 @@ class LLMRouter:
         raise ValueError(f"Unsupported embeddings provider: {emb.provider!r}")
 
     def provider_label(self, tier: LLMTier) -> str:
-        """Human-readable label for the primary provider of a tier, for provider_log."""
-        return self._config.tiers[tier.value].primary
+        """Return 'provider/model-name' for cost tracking and display."""
+        ref = self._config.tiers[tier.value].primary
+        provider_name, tier_name = ref.split("/", 1)
+        provider_cfg = self._config.providers.get(provider_name)
+        model_name = getattr(provider_cfg.models, tier_name, None) if provider_cfg else None
+        return f"{provider_name}/{model_name}" if model_name else ref
 
     # ------------------------------------------------------------------ #
     # Private helpers                                                       #

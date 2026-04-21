@@ -72,7 +72,7 @@ async def approve_plan(job_id: str) -> dict:
             raise HTTPException(status_code=409, detail="Job has no implementation plan")
 
         state.implementation_plan.status = "approved"
-        state.status = JobStatus.SKILLS_RETRIEVED  # re-enters graph; skips to codegen via routing
+        state.status = JobStatus.CODING  # immediately reflect that codegen is queued
         state.updated_at = datetime.utcnow()
 
         await redis_client.set(f"job:{job_id}", state.model_dump_json())
@@ -212,3 +212,25 @@ async def list_jobs() -> list[dict]:
         await redis_client.aclose()
 
     return rows
+
+
+@router.get("/{job_id}/logs")
+async def get_job_logs(job_id: str, n: int = 200) -> dict:
+    """Return stored log lines for a specific job from Redis."""
+    redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379")
+    redis_client = redis.from_url(redis_url, decode_responses=True)
+    try:
+        exists = await redis_client.exists(f"job:{job_id}")
+        if not exists:
+            raise HTTPException(status_code=404, detail=f"Job not found: {job_id}")
+        raw_lines = await redis_client.lrange(f"job:{job_id}:logs", -n, -1)
+        lines = []
+        for raw in raw_lines:
+            try:
+                import json
+                lines.append(json.loads(raw))
+            except Exception:
+                lines.append({"ts": "", "level": "INFO", "msg": raw})
+        return {"lines": lines, "total": len(lines)}
+    finally:
+        await redis_client.aclose()

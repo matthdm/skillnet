@@ -99,6 +99,6 @@ async def analyze_node(state: JobState, llm: BaseChatModel, provider_label: str)
         "status": JobStatus.ANALYZED,
         "provider_log": state.provider_log + [f"analyze:{provider_label}"],
         "updated_at": datetime.utcnow(),
-        "_input_tokens": input_tokens,
-        "_output_tokens": output_tokens,
+        "last_node_input_tokens": input_tokens,
+        "last_node_output_tokens": output_tokens,
     }

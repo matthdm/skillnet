@@ -156,3 +156,15 @@ async def clear_all_jobs() -> dict:
         return {"cleared_jobs": len(job_ids)}
     finally:
         await client.aclose()
+
+
+@router.get("/logs")
+async def get_logs(n: int = 200, level: str = "", job_id: str = "") -> dict:
+    """Return the last N lines from the in-memory log buffer."""
+    from logging_config import log_buffer
+    lines = list(log_buffer)
+    if level:
+        lines = [l for l in lines if l.get("level", "").upper() == level.upper()]
+    if job_id:
+        lines = [l for l in lines if l.get("job_id") == job_id]
+    return {"lines": lines[-n:], "total": len(lines)}

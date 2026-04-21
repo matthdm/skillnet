@@ -51,7 +51,12 @@ def build_graph(router: LLMRouter, store: SkillStore, repo_manager: RepoManager,
     )
 
     workflow.add_edge("plan", END)  # graph pauses; resumes after human approval
-    workflow.add_edge("codegen", "test")
+
+    workflow.add_conditional_edges(
+        "codegen",
+        _route_after_codegen,
+        {"test": "test", END: END},
+    )
 
     workflow.add_conditional_edges(
         "test",
@@ -59,7 +64,11 @@ def build_graph(router: LLMRouter, store: SkillStore, repo_manager: RepoManager,
         {"commit": "commit", "interpret": "interpret", "exhaust": "exhaust"},
     )
 
-    workflow.add_edge("interpret", "codegen")
+    workflow.add_conditional_edges(
+        "interpret",
+        _route_after_interpret,
+        {"codegen": "codegen", END: END},
+    )
     workflow.add_edge("commit", END)
     workflow.add_edge("exhaust", END)
 
@@ -74,6 +83,23 @@ def _route_after_retrieve(state: JobState) -> str:
         return "codegen"
     # PLANNING (pending) or REJECTED — graph ends, worker saves state
     return END
+
+
+_HALT_STATUSES = {JobStatus.PAUSED, JobStatus.FAILED, JobStatus.EXHAUSTED}
+
+
+def _route_after_codegen(state: JobState) -> str:
+    """Halt the graph if codegen failed or timed out; otherwise proceed to test."""
+    if state.status in _HALT_STATUSES:
+        return END
+    return "test"
+
+
+def _route_after_interpret(state: JobState) -> str:
+    """Halt the graph if interpret failed; otherwise loop back to codegen."""
+    if state.status in _HALT_STATUSES:
+        return END
+    return "codegen"
 
 
 def _route_after_test(state: JobState) -> str:

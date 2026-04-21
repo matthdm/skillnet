@@ -1145,6 +1145,279 @@ implementation_plan: ImplementationPlan | None = None
 
 ---
 
+## 25. MongoDB Unification Plan (Future)
+
+> **Status: Planned, not started.** No MongoDB instance exists yet. This section captures the
+> full migration design so it can be executed in a future iteration without re-deriving the
+> architecture. Do not begin implementation until MongoDB Atlas is provisioned.
+
+### Motivation
+
+v1 runs two separate data infrastructure components:
+
+| Component | Purpose | Cost model |
+|-----------|---------|------------|
+| Redis (docker, or managed) | Job state, queue, dedup, project registry, LangGraph checkpoints | Per-instance memory |
+| ChromaDB (embedded in API container) | Skill vector search | Free; bound to container lifecycle |
+
+MongoDB Atlas offers vector search, document storage, and a queue pattern in a single managed
+service. Unifying on Atlas eliminates ChromaDB as a dependency, removes Redis entirely, and
+consolidates operational overhead and billing to one platform.
+
+**Target: MongoDB Atlas M10 ($57/mo)** — includes vector search, change streams, and 10GB.
+Atlas M0 (free, 512MB) is viable for development and low-volume testing but lacks change
+streams (needed for the reactive queue).
+
+---
+
+### Collection Designs
+
+#### `skills` — replaces ChromaDB
+
+```json
+{
+  "_id": "skill_id",
+  "name": "FastAPI Route Pattern",
+  "description": "...",
+  "category": "web",
+  "tags": ["fastapi", "routing"],
+  "body": "# full skill markdown body",
+  "embedding": [0.123, -0.045, ...],
+  "source_path": "skills/fastapi-route/SKILL.md",
+  "supports_claude": true,
+  "supports_codex": true
+}
+```
+
+Atlas Vector Search index on `embedding`:
+```json
+{
+  "fields": [{
+    "type": "vector",
+    "path": "embedding",
+    "numDimensions": 1536,
+    "similarity": "cosine"
+  }]
+}
+```
+
+Query uses `$vectorSearch` aggregation stage with `$meta: "vectorSearchScore"` for score projection.
+
+#### `jobs` — replaces `job:{id}` Redis keys + `jobs:all` set
+
+JobState is already a Pydantic model with clean JSON serialization. One document per job.
+
+```json
+{
+  "_id": "job-uuid",
+  "story_id": "FEAT-006",
+  "status": "pending",
+  "job_type": "change_request",
+  "story_content": { "..." },
+  "execution_trace": [],
+  "implementation_plan": null,
+  "created_at": "ISODate",
+  "updated_at": "ISODate"
+}
+```
+
+Indexes:
+- `{ "story_id": 1 }` — unique sparse (dedup; replaces `features:seen` Redis set)
+- `{ "status": 1, "created_at": 1 }` — queue polling and status filtering
+- `{ "project_id": 1 }` — project job listing
+- `{ "parent_job_id": 1 }` — retry chain traversal
+
+#### `projects` — replaces `project:{id}` Redis keys + `projects:all` set
+
+Direct Project model mapping. No structural change needed.
+
+#### `checkpoints` — replaces `AsyncRedisSaver`
+
+LangGraph checkpoint schema: one document per `(thread_id, checkpoint_id)`.
+
+```json
+{
+  "_id": "thread_id:checkpoint_id",
+  "thread_id": "job-uuid",
+  "checkpoint_id": "...",
+  "parent_checkpoint_id": "...",
+  "checkpoint": { "...serialized graph state..." },
+  "metadata": { "..." },
+  "created_at": "ISODate"
+}
+```
+
+---
+
+### The Three Hard Parts
+
+#### 1. Queue — replacing Redis BLPOP
+
+BLPOP is an atomic blocking dequeue. MongoDB has no native equivalent. Two approaches:
+
+**Option A — Polling with `findOneAndUpdate` (works on M0)**
+```python
+async def dequeue(jobs_col) -> dict | None:
+    return await jobs_col.find_one_and_update(
+        {"status": "pending"},
+        {"$set": {"status": "processing"}},
+        sort=[("created_at", 1)],      # FIFO
+        return_document=True,
+    )
+```
+Worker polls this every 2 seconds. For our throughput (jobs/hour not jobs/second) this is
+perfectly adequate. Simple to implement and debug.
+
+**Option B — Change streams (requires M10+)**
+```python
+async with jobs_col.watch([{"$match": {"operationType": "insert"}}]) as stream:
+    async for change in stream:
+        job_id = change["fullDocument"]["_id"]
+        await process_job(job_id)
+```
+Reactive, ~50ms latency. Requires a replica set (Atlas M10 provides one). Use this for
+production if low-latency queue response matters.
+
+**Recommendation:** Start with Option A. It is simpler and sufficient for this workload.
+Add Option B as a hardening task when Atlas M10 is provisioned.
+
+#### 2. SkillStore — replacing ChromaDB
+
+```python
+class MongoSkillStore:
+    def __init__(self, collection, embeddings_model):
+        self._col = collection
+        self._embed = embeddings_model
+
+    async def query(self, text: str, n_results: int = 10) -> list[SkillMatch]:
+        vector = await asyncio.to_thread(self._embed.embed_query, text)
+        pipeline = [
+            {"$vectorSearch": {
+                "index": "skills_vector_idx",
+                "path": "embedding",
+                "queryVector": vector,
+                "numCandidates": n_results * 10,
+                "limit": n_results,
+            }},
+            {"$addFields": {"score": {"$meta": "vectorSearchScore"}}},
+        ]
+        docs = await self._col.aggregate(pipeline).to_list(n_results)
+        return [SkillMatch(skill=Skill(**doc), score=doc["score"]) for doc in docs]
+
+    async def upsert(self, skills: list[Skill]) -> None:
+        ops = [
+            ReplaceOne({"_id": s.skill_id}, s.model_dump(by_alias=True), upsert=True)
+            for s in skills
+        ]
+        await self._col.bulk_write(ops)
+```
+
+`ingest_skills.py` becomes a bulk `upsert` against the `skills` collection with the same
+embedding logic as today. The Atlas Vector Search index must be created once via the Atlas UI
+or API before the first query.
+
+#### 3. LangGraph Checkpointer — replacing AsyncRedisSaver
+
+No official MongoDB checkpointer exists in `langgraph-checkpoint-*` packages as of this
+writing. A custom implementation is required. The interface is:
+
+```python
+from langgraph.checkpoint.base import BaseCheckpointSaver, Checkpoint, CheckpointMetadata
+
+class MongoCheckpointSaver(BaseCheckpointSaver):
+    def __init__(self, collection):
+        self._col = collection
+
+    async def aget_tuple(self, config) -> CheckpointTuple | None:
+        thread_id = config["configurable"]["thread_id"]
+        doc = await self._col.find_one(
+            {"thread_id": thread_id},
+            sort=[("created_at", -1)],
+        )
+        if doc is None:
+            return None
+        return CheckpointTuple(config=config, checkpoint=doc["checkpoint"],
+                               metadata=doc["metadata"], parent_config=...)
+
+    async def aput(self, config, checkpoint, metadata, new_versions) -> dict:
+        await self._col.insert_one({
+            "thread_id": config["configurable"]["thread_id"],
+            "checkpoint_id": checkpoint["id"],
+            "checkpoint": checkpoint,
+            "metadata": metadata,
+            "created_at": datetime.utcnow(),
+        })
+        return {**config, "configurable": {"checkpoint_id": checkpoint["id"]}}
+
+    async def alist(self, config, *, filter=None, before=None, limit=None):
+        thread_id = config["configurable"]["thread_id"]
+        cursor = self._col.find({"thread_id": thread_id}, sort=[("created_at", -1)])
+        async for doc in cursor:
+            yield CheckpointTuple(...)
+```
+
+Estimated implementation: ~150 lines. Straightforward but must be verified against the
+LangGraph checkpoint interface contract before shipping. Monitor the
+`langgraph-checkpoint-mongodb` package — an official version may appear before this
+migration begins.
+
+**Alternative:** If the MongoDB checkpointer proves difficult, use `langgraph-checkpoint-postgres`
+with a free Neon or Supabase PostgreSQL tier for checkpoints only, and use MongoDB for
+everything else. PostgreSQL has official async LangGraph support.
+
+---
+
+### Migration Phases
+
+Execute sequentially. Each phase is independently deployable and reversible until Phase 6.
+
+| Phase | What | Key work | Risk |
+|-------|------|----------|------|
+| 1 | Add Motor (async MongoDB client) to dependencies alongside Redis + Chroma | `pip install motor pymongo`; add `MONGO_URL` env var | None |
+| 2 | Migrate skills: ingest to MongoDB, swap `SkillStore` → `MongoSkillStore`, remove Chroma volume | Implement `MongoSkillStore`; update `ingest_skills.py`; create Atlas Vector Search index | Low — retrieval quality testable before any state migration |
+| 3 | Migrate state: write `JobState` to MongoDB in parallel with Redis on every update; read from Mongo | Dual-write in `api/main.py` worker; validate reads match Redis | Medium — dual-write period; rollback is flip a flag |
+| 4 | Cut over queue: replace BLPOP worker with polling `findOneAndUpdate` | Remove `jobs:queue` Redis list; worker reads from `jobs` collection | Medium — needs thorough testing; no BLPOP fallback once cut |
+| 5 | Implement MongoDB checkpointer, replace `AsyncRedisSaver` | ~150 lines; integration test with full pipeline run | Low — checkpointer failure degrades to `InMemorySaver` |
+| 6 | Remove Redis + ChromaDB dependencies | Drop packages; remove env vars; delete docker-compose services | Low — done only after Phases 2–5 validated |
+
+---
+
+### Files Affected (when work begins)
+
+| File | Change |
+|------|--------|
+| `requirements.txt` | Add `motor`, `pymongo`; remove `redis`, `chromadb` |
+| `docker-compose.yml` | Remove `redis` service; add `mongo` service (for local dev) OR point at Atlas URL |
+| `core/skills.py` | Replace `SkillStore` (ChromaDB) with `MongoSkillStore` |
+| `scripts/ingest_skills.py` | Replace ChromaDB upsert with MongoDB bulk_write |
+| `api/main.py` | Replace Redis client with Motor client; swap worker queue mechanism |
+| `api/routes/jobs.py` | Replace all Redis ops with Motor CRUD |
+| `api/routes/projects.py` | Replace all Redis ops with Motor CRUD |
+| `api/routes/admin.py` | Replace Redis stats endpoint; add MongoDB collection stats |
+| `api/routes/ingest.py` | Replace Redis dedup set with MongoDB unique index insert |
+| `core/checkpointer.py` | New file — `MongoCheckpointSaver` |
+| `models/job.py` | Add `model_config = ConfigDict(populate_by_name=True)` for `_id` alias |
+| `.env` | Add `MONGO_URL`; remove `REDIS_URL` |
+
+---
+
+### Codex vs Claude Delegation (when ready)
+
+**Codex** (mechanical, interface-stable):
+- `MongoSkillStore` implementation (method signatures defined above)
+- `ingest_skills.py` → bulk upsert
+- All Redis → Motor substitutions in `api/routes/*.py` (CRUD is identical in structure)
+- `docker-compose.yml` update
+- `requirements.txt` update
+
+**Claude** (architectural judgment):
+- `MongoCheckpointSaver` (subtle LangGraph interface contract)
+- Worker queue refactor (polling loop + atomic claim pattern)
+- Dual-write phase management (Phase 3)
+- Atlas Vector Search index configuration verification
+
+---
+
 ## 23. Decision Log
 
 All significant decisions are recorded here with rationale. Do not delete entries.
@@ -1178,3 +1451,4 @@ All significant decisions are recorded here with rationale. Do not delete entrie
 | 2026-04-20 | Pre-codegen planning step with human approval gate | Before codegen runs, a HIGH tier (Opus) LLM produces a lightweight plan: requirements brief, approach, file list, token/cost estimate. Job pauses in PLANNING state. Human approves (job re-queues to codegen) or rejects (REJECTED terminal state). HIGH tier for plan because correctness of understanding matters more than cost at this stage — plan call is ~1-2K tokens ($0.03 Opus vs $0.005 Sonnet). MEDIUM tier for codegen as before. | MEDIUM for both (cheaper but risks misunderstanding spec at plan time) |
 | 2026-04-20 | REJECTED is a distinct terminal state from FAILED | Rejection means the spec was wrong or misunderstood — operator must refine and resubmit. FAILED means the spec was correct but implementation encountered errors — retry/resume flow applies. Keeping them separate ensures retry logic is never triggered on a deliberately stopped job. | Single FAILED state for both (mixes spec problems with implementation problems) |
 | 2026-04-20 | Token usage and cost tracked per NodeTrace entry | Per-node token counts (via LangChain `TokenUsageHandler` callback) give actionable cost attribution. Summing across the trace gives job-level totals for the dashboard metrics row. Cost estimated from provider label using Anthropic public pricing table. | Job-level totals only (masks which nodes are expensive); no cost tracking (can't optimize spend) |
+| 2026-04-20 | MongoDB Atlas chosen as future unified data platform; migration deferred until Atlas provisioned | v1 runs Redis (state/queue) + ChromaDB (vector search) as two separate components. MongoDB Atlas provides vector search (`$vectorSearch`), document storage, and a queue pattern (polling or change streams) in one managed service. Single bill, single operational surface. Migration plan documented in Section 25. Not started — no Atlas instance exists yet. | Keep Redis + ChromaDB indefinitely (two services, two bills, more ops); switch to PostgreSQL (good LangGraph checkpointer support but no vector search) |

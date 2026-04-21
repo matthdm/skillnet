@@ -73,13 +73,12 @@ def pipeline_progress(status: str) -> None:
     st.progress(min(pct, 1.0))
 
 
-def elapsed(created_at: str | None, updated_at: str | None) -> str:
+def elapsed(created_at: str | None, status: str) -> str:
     if not created_at:
         return "—"
     try:
-        fmt = "%Y-%m-%dT%H:%M:%S.%f"
         t0 = datetime.fromisoformat(created_at.split("+")[0].rstrip("Z"))
-        t1 = datetime.fromisoformat(updated_at.split("+")[0].rstrip("Z")) if updated_at else datetime.utcnow()
+        t1 = datetime.utcnow()  # always use wall clock so active jobs keep ticking
         secs = int((t1 - t0).total_seconds())
         if secs < 60:
             return f"{secs}s"
@@ -198,8 +197,8 @@ render_alerts(job)
 
 # Post-approval indicator: plan approved but codegen hasn't started yet
 plan_data = job.get("implementation_plan")
-if plan_data and plan_data.get("status") == "approved" and status == "skills_retrieved":
-    st.info("Plan approved — queued for codegen.", icon="⏳")
+if plan_data and plan_data.get("status") == "approved" and status == "coding":
+    st.info("Plan approved — codegen running.", icon="⏳")
 
 render_recovery_actions(job_id, status)
 
@@ -220,7 +219,7 @@ m1.metric("Input tokens", f"{total_in:,}")
 m2.metric("Output tokens", f"{total_out:,}")
 m3.metric("Est. cost", f"${total_cost:.4f}")
 m4.metric("Node time", f"{total_dur / 1000:.1f}s")
-m5.metric("Elapsed", elapsed(job.get("created_at"), job.get("updated_at")))
+m5.metric("Elapsed", elapsed(job.get("created_at"), status))
 
 # ── Plan Review (PLANNING state) ─────────────────────────────────────────────
 plan = job.get("implementation_plan")
@@ -378,6 +377,56 @@ if generated:
 # ── Raw state ────────────────────────────────────────────────────────────────
 with st.expander("Full job state", expanded=False):
     st.json(job)
+
+# ── Log stream ────────────────────────────────────────────────────────────────
+st.divider()
+_LOG_LEVEL_COLORS = {
+    "INFO":     ("#0dcaf0", "#000"),
+    "WARNING":  ("#ffc107", "#000"),
+    "ERROR":    ("#dc3545", "#fff"),
+    "CRITICAL": ("#842029", "#fff"),
+    "DEBUG":    ("#6c757d", "#fff"),
+}
+
+log_expanded = status not in TERMINAL_STAGES
+with st.expander(f"Log stream", expanded=log_expanded):
+    try:
+        log_resp = requests.get(f"{API_URL}/jobs/{job_id}/logs", params={"n": 200}, timeout=5)
+        log_data = log_resp.json() if log_resp.status_code == 200 else {"lines": []}
+    except Exception:
+        log_data = {"lines": []}
+
+    log_lines = log_data.get("lines", [])
+    if not log_lines:
+        st.caption("No log lines captured yet.")
+    else:
+        rows = []
+        for entry in reversed(log_lines):
+            level = entry.get("level", "INFO")
+            bg, fg = _LOG_LEVEL_COLORS.get(level, ("#6c757d", "#fff"))
+            badge = (
+                f"<span style='background:{bg};color:{fg};padding:0.1rem 0.35rem;"
+                f"border-radius:3px;font-size:0.7rem;font-weight:700'>{level}</span>"
+            )
+            node_tag = (
+                f" <span style='color:#6cf;font-size:0.72rem'>[{entry['node']}]</span>"
+                if entry.get("node") else ""
+            )
+            ts = entry.get("ts", "")[-12:]  # just HH:MM:SS.mmm
+            msg = entry.get("msg", "").replace("<", "&lt;").replace(">", "&gt;")
+            rows.append(
+                f"<div style='font-family:monospace;font-size:0.76rem;"
+                f"padding:0.1rem 0;border-bottom:1px solid #1a1a1a;white-space:pre-wrap'>"
+                f"<span style='color:#444;margin-right:0.4rem'>{ts}</span>"
+                f"{badge}{node_tag} "
+                f"<span style='color:#ddd'>{msg}</span></div>"
+            )
+        st.markdown(
+            "<div style='max-height:400px;overflow-y:auto;background:#111;"
+            "padding:0.5rem;border-radius:4px'>" + "\n".join(rows) + "</div>",
+            unsafe_allow_html=True,
+        )
+        st.caption(f"{len(log_lines)} log lines")
 
 # ── Live refresh for active jobs ─────────────────────────────────────────────
 if status not in TERMINAL_STAGES:

@@ -14,7 +14,7 @@ from models.job import JobState, JobStatus
 
 logger = logging.getLogger(__name__)
 
-_TIMEOUT = 120  # seconds
+_TIMEOUT = 600  # seconds — large multi-file new_service specs can exceed 5 min
 _MAX_SKILL_DESC_CHARS = 300
 _MAX_TOP_SKILLS = 3
 
@@ -145,6 +145,6 @@ async def codegen_node(state: JobState, llm: BaseChatModel, provider_label: str)
         "iteration_count": state.iteration_count + 1,
         "provider_log": state.provider_log + [f"codegen:{provider_label}"],
         "updated_at": datetime.utcnow(),
-        "_input_tokens": input_tokens,
-        "_output_tokens": output_tokens,
+        "last_node_input_tokens": input_tokens,
+        "last_node_output_tokens": output_tokens,
     }

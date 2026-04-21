@@ -87,3 +87,6 @@ class JobState(BaseModel):
     parent_job_id: str | None = None       # set when this job is a retry/resume of a prior job
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
+    # transient per-node token counts — read and reset by the worker after each node
+    last_node_input_tokens: int = 0
+    last_node_output_tokens: int = 0
